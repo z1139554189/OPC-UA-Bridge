@@ -1,0 +1,3 @@
+# SCF 云函数依赖
+# pymysql 是 SCF Python 运行时自带的，这里列出备用
+pymysql>=1.0.0

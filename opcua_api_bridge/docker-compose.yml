@@ -1,0 +1,114 @@
+version: "3.9"
+
+# ─── 公共配置 ──────────────────────────────────────────────
+x-common-env: &common-env
+  ENVIRONMENT: ${ENVIRONMENT:-development}
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+
+# ─── 服务 ──────────────────────────────────────────────────
+services:
+
+  # OPC UA REST API 桥接器
+  opcua-bridge:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    container_name: opcua-bridge
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      <<: *common-env
+      OPCUA_ENDPOINT: ${OPCUA_ENDPOINT:-opc.tcp://host.docker.internal:4840}
+      OPCUA_USERNAME: ${OPCUA_USERNAME:-}
+      OPCUA_PASSWORD: ${OPCUA_PASSWORD:-}
+      SECRET_KEY: ${SECRET_KEY:-dev-secret-key-change-in-prod}
+      REDIS_URL: redis://redis:6379/0
+      DATABASE_URL: sqlite:////app/data/opcua_bridge.db
+    volumes:
+      - bridge-data:/app/data
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - opcua-net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    # 资源限制
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 512M
+        reservations:
+          cpus: "0.5"
+          memory: 128M
+
+  # Redis 缓存
+  redis:
+    image: redis:7-alpine
+    container_name: opcua-redis
+    restart: unless-stopped
+    command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis-data:/data
+    networks:
+      - opcua-net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Prometheus 监控
+  prometheus:
+    image: prom/prometheus:v2.48.0
+    container_name: opcua-prometheus
+    restart: unless-stopped
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./deployment/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=15d"
+      - "--web.enable-lifecycle"
+    networks:
+      - opcua-net
+
+  # Grafana 可视化
+  grafana:
+    image: grafana/grafana:10.2.0
+    container_name: opcua-grafana
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./deployment/grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
+    depends_on:
+      - prometheus
+    networks:
+      - opcua-net
+
+# ─── 数据卷 ─────────────────────────────────────────────────
+volumes:
+  bridge-data:
+  redis-data:
+  prometheus-data:
+  grafana-data:
+
+# ─── 网络 ───────────────────────────────────────────────────
+networks:
+  opcua-net:
+    driver: bridge

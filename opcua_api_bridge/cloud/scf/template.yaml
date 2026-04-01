@@ -1,0 +1,49 @@
+# SCF 云函数部署配置模板
+# 
+# 部署方式：
+# 方式一：控制台手动创建（推荐新手）
+#   参考 README.md 中的步骤
+#
+# 方式二：使用 Serverless Framework CLI 部署
+#   npm install -g serverless
+#   serverless deploy
+
+app: opcua-cloud-api
+stage: production
+
+components:
+  myFunction:
+    component: "@serverless/tencent-scf"
+    inputs:
+      name: opcua-data-api
+      codeUri: ./
+      handler: index.main_handler
+      runtime: Python 3.10
+      region: ap-shanghai
+      
+      # VPC 配置（必须与 MySQL 在同一 VPC）
+      vpcConfig:
+        vpcId: vpc-dh9uf32a
+        subnetId: subnet-ob3fhqkf
+      
+      # 环境变量
+      environment:
+        variables:
+          DB_HOST: "172.17.0.2"
+          DB_PORT: "3306"
+          DB_NAME: "opcua_db"
+          DB_USER: "opcua_user"
+          DB_PASSWORD: "在这里填密码"
+      
+      # API 网关触发器
+      events:
+        - apigw:
+            name: opcua-api-gateway
+            parameters:
+              protocols:
+                - http
+                - https
+              environment: release
+              endpoints:
+                - path: /
+                  method: ANY

@@ -1,0 +1,43 @@
+# OPC UA REST API 桥接器 - 依赖包
+
+# Web框架
+fastapi
+uvicorn[standard]
+python-multipart
+
+# OPC UA 客户端（使用同步版本避免异步 API 兼容性问题）
+opcua
+
+# 数据验证
+pydantic
+pydantic-settings
+
+# 数据库和缓存
+redis
+sqlalchemy
+
+# 监控和日志
+prometheus-client
+structlog
+pyyaml
+
+# 安全和认证
+python-jose[cryptography]
+passlib[bcrypt]
+python-dotenv
+
+# 测试
+pytest
+pytest-asyncio
+httpx
+
+# 工具
+python-dateutil
+pandas
+numpy
+
+# 部署
+gunicorn
+
+# 报表模块
+openpyxl
