@@ -153,8 +153,26 @@ def warmup_subscriptions(nodes: list[str], timeout: int = 15) -> bool:
         return False
 
 
+def _is_file_locked(filepath: str) -> bool:
+    """检测文件是否被其他进程占用（Excel 打开中）"""
+    try:
+        # 用 append 模式试开，不会破坏文件内容
+        with open(filepath, "a"):
+            pass
+        return False
+    except PermissionError:
+        return True
+
+
 def run_once(db_path: str, nodes: list[str], output_file: Path) -> bool:
-    """执行一次 SQLite 读取 + Excel 追加，返回是否成功"""
+    """执行一次 SQLite 读取 + Excel 追加，返回是否成功。
+    返回 None 表示文件被占用（跳过，不计入失败）。
+    """
+    # 文件存在时先检测是否被占用，避免 openpyxl 报错
+    if output_file.exists() and _is_file_locked(str(output_file)):
+        logger.debug(f"Excel 被占用，跳过本轮写入（不影响数据采集）")
+        return None  # 文件锁定，不重试、不计失败
+
     try:
         values = read_latest_values(db_path, nodes)
         generate_excel(
@@ -163,20 +181,24 @@ def run_once(db_path: str, nodes: list[str], output_file: Path) -> bool:
             output_path=str(output_file),
         )
         return True
-    except PermissionError as e:
-        logger.warning(f"文件被占用，跳过本次: {e}")
-        return False
+    except PermissionError:
+        logger.debug(f"Excel 写入时被占用，跳过本轮")
+        return None
     except Exception as e:
         logger.error(f"报表生成失败: {e}", exc_info=True)
         return False
 
 
 def run_once_with_retry(db_path: str, nodes: list[str], output_file: Path) -> bool:
-    """带重试的单次采集"""
+    """带重试的单次采集。文件锁定不算失败，不触发重试。"""
     for attempt in range(1, MAX_RETRIES + 1):
-        ok = run_once(db_path, nodes, output_file)
-        if ok:
+        result = run_once(db_path, nodes, output_file)
+        if result is True:
             return True
+        if result is None:
+            # 文件被占用，不重试，直接返回"成功"（数据没丢）
+            return True
+        # 其他失败才重试
         if attempt < MAX_RETRIES:
             logger.info(f"第 {attempt}/{MAX_RETRIES} 次失败，{RETRY_INTERVAL}秒后重试...")
             time.sleep(RETRY_INTERVAL)
