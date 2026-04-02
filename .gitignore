@@ -27,6 +27,9 @@ _test_browser.py
 node-installer.msi
 node.zip
 query
+auto_git_push.bat
+auto_git_push.ps1
+auto_git_push.vbs
 
 # ===== WorkBuddy 本地配置 =====
 .workbuddy/
