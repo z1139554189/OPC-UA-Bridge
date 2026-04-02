@@ -99,6 +99,25 @@
   - **SCF Web 函数**：Flask 版代码已写好（`cloud/scf/index.py`），待在控制台创建
   - **用户建议**：考虑 MQTT 协议（腾讯云 IoT Hub），工业数据上传的事实标准
 
+## 工作区信息
+
+- **Claw 工作区**：`c:\Users\Administrator\WorkBuddy\Claw`
+- **OPC 工作区**：`c:\Users\Administrator\WorkBuddy\20260326125244`
+- **记忆同步**：两个仓库都保存 MEMORY.md，保持同步
+
+## 记忆方案（已配置）
+
+| 层级 | 组件 | 状态 | 用途 |
+|------|------|------|------|
+| Layer 1 | SESSION-STATE.md | ✅ 运行中 | 当前任务热存储 |
+| Layer 4 | MEMORY.md + daily/ | ✅ 运行中 | 长期记忆 + 日志 |
+| Git 同步 | GitHub 仓库 | ✅ 已配置 | 跨设备备份 |
+
+- **GitHub 仓库**：
+  - `workbuddy-claw-memory`：Claw 工作区记忆
+  - `opcua-api-bridge`：OPC 项目代码 + 记忆
+- **同步方式**：手动 `git push` 或锁屏自动 push
+
 ## 系统环境
 
 - **OS**：Windows 10 22H2 (Build 19045)
