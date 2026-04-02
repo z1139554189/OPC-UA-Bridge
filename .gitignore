@@ -32,7 +32,8 @@ auto_git_push.ps1
 auto_git_push.vbs
 
 # ===== WorkBuddy 本地配置 =====
-.workbuddy/
+.workbuddy/*
+!.workbuddy/memory/
 
 # ===== 调试脚本（根目录临时文件） =====
 opcua_api_bridge/test_api.py
