@@ -58,7 +58,9 @@ opcua_api_bridge/test_statuscode.py
 opcua_api_bridge/test_subscription.py
 opcua_api_bridge/verify_history.py
 opcua_api_bridge/reporter/scheduler.log
+opcua_api_bridge/reporter/alert.log
 opcua_api_bridge/reporter/output/
+opcua_api_bridge/reporter/*.xlsx
 
 # ===== IDE =====
 .vscode/

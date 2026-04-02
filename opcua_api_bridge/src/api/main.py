@@ -35,38 +35,108 @@ logger = structlog.get_logger()
 # OPC UA 客户端实例
 opcua_client: Optional[OPCUAClient] = None
 
+# 容错配置
+RECONNECT_INTERVAL = 30      # 断连重连间隔（秒）
+RECONNECT_MAX_RETRIES = 0    # 0 = 无限重试
+
 # 认证
 security = HTTPBearer()
 
 # 应用生命周期管理
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """应用生命周期管理"""
-    # 启动时
+    """应用生命周期管理（含 OPC UA 断连自动重连）"""
     global opcua_client
     logger.info("opcua_bridge_starting", version="1.0.0")
     
-    try:
-        # 初始化 OPC UA 客户端（不使用安全策略）
-        opcua_client = OPCUAClient(
-            endpoint=settings.OPCUA_ENDPOINT,
-            username=settings.OPCUA_USERNAME,
-            password=settings.OPCUA_PASSWORD,
-            security_policy=None,  # 无安全策略
-            security_mode=None      # 无安全模式
-        )
-        await opcua_client.connect()
-        logger.info("opcua_connected", endpoint=settings.OPCUA_ENDPOINT)
-    except Exception as e:
-        logger.error("opcua_connection_failed", error=str(e))
-        # 应用可以启动，但 OPC UA 功能不可用
+    # 首次连接 OPC UA
+    opcua_client = OPCUAClient(
+        endpoint=settings.OPCUA_ENDPOINT,
+        username=settings.OPCUA_USERNAME,
+        password=settings.OPCUA_PASSWORD,
+        security_policy=None,
+        security_mode=None
+    )
+    await _connect_opcua()
+    
+    # 启动后台重连任务
+    reconnect_task = asyncio.create_task(_reconnect_monitor())
     
     yield
     
     # 关闭时
+    reconnect_task.cancel()
+    try:
+        await reconnect_task
+    except asyncio.CancelledError:
+        pass
     if opcua_client:
-        await opcua_client.disconnect()
+        try:
+            await opcua_client.disconnect()
+        except Exception:
+            pass
     logger.info("opcua_bridge_shutdown")
+
+
+async def _connect_opcua():
+    """尝试连接 OPC UA 服务器"""
+    global opcua_client
+    try:
+        await opcua_client.connect()
+        logger.info("opcua_connected", endpoint=settings.OPCUA_ENDPOINT)
+        return True
+    except Exception as e:
+        logger.error("opcua_connection_failed", error=str(e))
+        return False
+
+
+async def _reconnect_monitor():
+    """后台任务：监控 OPC UA 连接状态，断连自动重连"""
+    global opcua_client
+    retries = 0
+    while True:
+        await asyncio.sleep(RECONNECT_INTERVAL)
+        if opcua_client and opcua_client.is_connected():
+            retries = 0  # 连接正常，重置计数
+            continue
+        
+        # 断连了，尝试重连
+        retries += 1
+        logger.warning(
+            "opcua_reconnect_attempt",
+            attempt=retries,
+            interval=f"{RECONNECT_INTERVAL}s",
+        )
+        
+        try:
+            if opcua_client:
+                try:
+                    await opcua_client.disconnect()
+                except Exception:
+                    pass
+            
+            opcua_client = OPCUAClient(
+                endpoint=settings.OPCUA_ENDPOINT,
+                username=settings.OPCUA_USERNAME,
+                password=settings.OPCUA_PASSWORD,
+                security_policy=None,
+                security_mode=None,
+            )
+            ok = await opcua_client.connect()
+            if ok:
+                logger.info("opcua_reconnected", endpoint=settings.OPCUA_ENDPOINT)
+                retries = 0
+            else:
+                logger.error("opcua_reconnect_failed", attempt=retries, error="connect() returned False")
+        except Exception as e:
+            if RECONNECT_MAX_RETRIES > 0 and retries >= RECONNECT_MAX_RETRIES:
+                logger.error(
+                    "opcua_reconnect_give_up",
+                    attempts=retries,
+                    error=str(e),
+                )
+                break
+            logger.error("opcua_reconnect_failed", attempt=retries, error=str(e))
 
 # 创建 FastAPI 应用
 app = FastAPI(
@@ -91,7 +161,7 @@ app.add_middleware(
 @app.exception_handler(Exception)
 async def global_exception_handler(request, exc):
     """全局异常处理"""
-    logger.error("unexpected_error", path=request.url.path, error=str(exc))
+    logger.error("unexpected_error", path=request.url.path, error=str(exc), exc_info=True)
     return JSONResponse(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
         content={"detail": "Internal server error"}
