@@ -4,11 +4,11 @@ SCF Web 函数 - OPC UA 数据查询 API
 使用 Flask 框架，SCF 会自动分配 HTTP 访问地址
 
 环境变量（在 SCF 控制台设置）：
-  DB_HOST=172.17.0.2
-  DB_PORT=3306
+  DB_HOST=sh-cynosdbmysql-grp-4f512ckw.sql.tencentcdb.com
+  DB_PORT=21397
   DB_NAME=opcua_db
   DB_USER=opcua_user
-  DB_PASSWORD=Admin_00
+  DB_PASSWORD=（控制台设置）
 """
 
 import os
@@ -30,7 +30,7 @@ logger.setLevel(logging.INFO)
 def _get_conn():
     """获取 MySQL 连接"""
     return pymysql.connect(
-        host=os.environ.get("DB_HOST", "172.17.0.2"),
+        host=os.environ.get("DB_HOST", "sh-cynosdbmysql-grp-4f512ckw.sql.tencentcdb.com"),
         port=int(os.environ.get("DB_PORT", "3306")),
         database=os.environ.get("DB_NAME", "opcua_db"),
         user=os.environ.get("DB_USER", "opcua_user"),
