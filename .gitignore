@@ -34,6 +34,7 @@ auto_git_push.vbs
 # ===== WorkBuddy 本地配置 =====
 .workbuddy/*
 !.workbuddy/memory/
+.workbuddy/memory/MEMORY.md
 
 # ===== 调试脚本（根目录临时文件） =====
 opcua_api_bridge/test_api.py
