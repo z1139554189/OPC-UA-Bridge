@@ -1,11 +1,17 @@
 """
 OPC UA REST API 桥接器 - 主应用入口
 Author: WorkBuddy SRE
-Version: 1.0.0
+Version: 3.0.0
+
+v3.0.0 改动：
+- 适配自适应采集模式（client.py v6.0.0）
+- 记录启动时间供健康检查使用
+- API 层只从缓存读取
 """
 
 import os
 import logging
+import time
 import asyncio
 from contextlib import asynccontextmanager
 from typing import Optional, Dict, Any
@@ -35,21 +41,20 @@ logger = structlog.get_logger()
 # OPC UA 客户端实例
 opcua_client: Optional[OPCUAClient] = None
 
-# 容错配置
-RECONNECT_INTERVAL = 30      # 断连重连间隔（秒）
-RECONNECT_MAX_RETRIES = 0    # 0 = 无限重试
-
 # 认证
 security = HTTPBearer()
+
+# 应用启动时间
+_start_time = time.time()
 
 # 应用生命周期管理
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """应用生命周期管理（含 OPC UA 断连自动重连）"""
+    """应用生命周期管理"""
     global opcua_client
-    logger.info("opcua_bridge_starting", version="1.0.0")
+    logger.info("opcua_bridge_starting", version="3.0.0")
     
-    # 首次连接 OPC UA
+    # 初始化 OPC UA 客户端并启动自适应采集
     opcua_client = OPCUAClient(
         endpoint=settings.OPCUA_ENDPOINT,
         username=settings.OPCUA_USERNAME,
@@ -57,92 +62,30 @@ async def lifespan(app: FastAPI):
         security_policy=None,
         security_mode=None
     )
-    await _connect_opcua()
-    
-    # 启动后台重连任务
-    reconnect_task = asyncio.create_task(_reconnect_monitor())
+    opcua_client._start_time = _start_time
+
+    ok = await opcua_client.start()
+    if ok:
+        logger.info("opcua_adaptive_collect_started", endpoint=settings.OPCUA_ENDPOINT)
+    else:
+        logger.error("opcua_collect_start_failed")
     
     yield
     
     # 关闭时
-    reconnect_task.cancel()
-    try:
-        await reconnect_task
-    except asyncio.CancelledError:
-        pass
     if opcua_client:
         try:
-            await opcua_client.disconnect()
+            await opcua_client.stop()
         except Exception:
             pass
     logger.info("opcua_bridge_shutdown")
 
 
-async def _connect_opcua():
-    """尝试连接 OPC UA 服务器"""
-    global opcua_client
-    try:
-        await opcua_client.connect()
-        logger.info("opcua_connected", endpoint=settings.OPCUA_ENDPOINT)
-        return True
-    except Exception as e:
-        logger.error("opcua_connection_failed", error=str(e))
-        return False
-
-
-async def _reconnect_monitor():
-    """后台任务：监控 OPC UA 连接状态，断连自动重连"""
-    global opcua_client
-    retries = 0
-    while True:
-        await asyncio.sleep(RECONNECT_INTERVAL)
-        if opcua_client and opcua_client.is_connected():
-            retries = 0  # 连接正常，重置计数
-            continue
-        
-        # 断连了，尝试重连
-        retries += 1
-        logger.warning(
-            "opcua_reconnect_attempt",
-            attempt=retries,
-            interval=f"{RECONNECT_INTERVAL}s",
-        )
-        
-        try:
-            if opcua_client:
-                try:
-                    await opcua_client.disconnect()
-                except Exception:
-                    pass
-            
-            opcua_client = OPCUAClient(
-                endpoint=settings.OPCUA_ENDPOINT,
-                username=settings.OPCUA_USERNAME,
-                password=settings.OPCUA_PASSWORD,
-                security_policy=None,
-                security_mode=None,
-            )
-            ok = await opcua_client.connect()
-            if ok:
-                logger.info("opcua_reconnected", endpoint=settings.OPCUA_ENDPOINT)
-                retries = 0
-            else:
-                logger.error("opcua_reconnect_failed", attempt=retries, error="connect() returned False")
-        except Exception as e:
-            if RECONNECT_MAX_RETRIES > 0 and retries >= RECONNECT_MAX_RETRIES:
-                logger.error(
-                    "opcua_reconnect_give_up",
-                    attempts=retries,
-                    error=str(e),
-                )
-                break
-            logger.error("opcua_reconnect_failed", attempt=retries, error=str(e))
-
 # 创建 FastAPI 应用
 app = FastAPI(
     title="OPC UA REST API Bridge",
-    description="轻量级 OPC UA 到 REST API 的桥接器",
-    version="1.0.0",
+    description="轻量级 OPC UA 到 REST API 的桥接器（自适应采集模式）",
+    version="3.0.0",
     lifespan=lifespan,
     docs_url="/docs" if settings.DEBUG else None,
     redoc_url="/redoc" if settings.DEBUG else None
@@ -171,6 +114,12 @@ async def global_exception_handler(request, exc):
 @app.get("/health", tags=["监控"])
 async def health_check():
     """系统健康检查"""
+    if not opcua_client:
+        return JSONResponse(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            content={"status": "unhealthy", "detail": "客户端未初始化"}
+        )
+
     health = HealthCheck(opcua_client)
     status_result = await health.check_all()
     
@@ -193,13 +142,13 @@ async def get_nodes(
 ):
     """
     获取 OPC UA 节点列表（分页）
+    - 临时短连接浏览，用完即释放 Session
     - 不传 node_id 默认从 Objects 节点（ns=0;i=85）开始
-    - 服务器共有 3000+ 节点，建议使用 offset/limit 分页
     """
     if not opcua_client:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="OPC UA 客户端未连接"
+            detail="OPC UA 客户端未初始化"
         )
 
     try:
@@ -222,7 +171,7 @@ async def get_nodes(
 @app.get("/api/v1/nodes/{node_id}/value", tags=["数据读取"])
 async def read_node_value(node_id: str):
     """
-    读取指定节点的当前值
+    读取指定节点的当前值（从缓存读取，并注册到采集列表）
     """
     if not opcua_client:
         raise HTTPException(
@@ -249,7 +198,10 @@ async def read_node_value(node_id: str):
 # 批量读取节点值
 @app.post("/api/v1/nodes/batch-read", tags=["数据读取"])
 async def batch_read_values(node_ids: list[str]):
-    """批量读取多个节点的值（通过订阅缓存）"""
+    """
+    批量读取多个节点的值（从缓存读取，并注册到采集列表）。
+    首次请求时节点可能尚未采集到数据，订阅推送后即可获取。
+    """
     if not opcua_client:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -274,8 +226,11 @@ async def cache_stats():
         raise HTTPException(status_code=503, detail="OPC UA 客户端未连接")
     return {
         "cache_size": opcua_client.get_cache_size(),
-        "subscribed_count": opcua_client.get_subscribed_count(),
+        "registered_nodes": opcua_client.get_subscribed_count(),
+        "cache_freshness_seconds": opcua_client.get_cache_freshness(),
         "connected": opcua_client.is_connected(),
+        "collect_status": opcua_client.get_collect_status(),
+        "yielded": opcua_client.is_yielded(),
     }
 
 # 读取历史数据
@@ -330,7 +285,9 @@ async def root():
     """API 根路径"""
     return {
         "name": "OPC UA REST API Bridge",
-        "version": "1.0.0",
+        "version": "3.0.0",
+        "mode": "adaptive_collect",
+        "collect_status": opcua_client.get_collect_status() if opcua_client else "not_initialized",
         "status": "operational" if opcua_client else "degraded",
         "docs": "/docs" if settings.DEBUG else None,
         "health": "/health"

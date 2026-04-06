@@ -13,6 +13,11 @@ REPORT_CONFIG = {
         "ns=1;s=FIT_05R303F01.PV",
         "ns=1;s=FIT_05R304F01.PV",
         "ns=1;s=FIT_05R305F01.PV",
+        "ns=1;s=FIT_05R306F01.PV",
+        "ns=1;s=FIT_05R307F01.PV",
+        "ns=1;s=FIT_05R308F01.PV",
+        "ns=1;s=FIT_05R309F01.PV",
+        "ns=1;s=FIT_05R310F01.PV",
     ],
 
     # ── 定时调度间隔（分钟） ─────────────────────

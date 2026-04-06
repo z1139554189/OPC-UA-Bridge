@@ -1,18 +1,20 @@
 """
-OPC UA 客户端核心模块（asyncua 版，按需订阅缓存 + SQLite 历史库）
+OPC UA 客户端核心模块（自适应采集模式 + 推送超时检测）
 Author: WorkBuddy SRE
-Version: 4.0.0
+Version: 7.0.0
 
 关键设计：
-- 使用 asyncua（异步库），兼容该 OPC UA 服务器
-- 连接后创建一个共享订阅通道（秒级完成），节点按需动态添加
-- 订阅推送的值缓存在内存字典，read_value/batch_read 均从缓存读取
-- 订阅推送同时写入 SQLite 历史库，read_history 查询本地库
-- 线程安全：asyncua 本身是 async，在同一 event loop 里运行
+- 默认保持长连接 + 订阅，数据持续推送（秒级），全部写入 SQLite
+- 检测到 Session 被占用（BadTooManySessions）时自动让出
+- 每 YIELD_RECHECK_INTERVAL 秒尝试重连，客户端断开后自动恢复
+- 推送超时检测：N 秒内未收到任何推送 → 视为连接异常 → 断开重连
+- 心跳写入：定期将缓存值写入 SQLite（source=heartbeat），保证时间序列连续
+- API 层只从内存缓存读取，无阻塞
 """
 
 import asyncio
 import logging
+import os
 import time
 from datetime import datetime
 from typing import Optional, Dict, Any, List, Set
@@ -25,6 +27,25 @@ from src.config.settings import settings
 from src.storage import HistoryDB
 
 logger = structlog.get_logger()
+
+# 缓存数据过期时间（秒），超过此时间缓存数据视为过期
+CACHE_STALE_TIMEOUT = 120
+
+# Session 被占用后的重试间隔（秒）
+YIELD_RECHECK_INTERVAL = 30
+
+# 推送超时：N 秒内未收到任何 datachange_notification → 视为连接异常
+PUSH_TIMEOUT = 300
+
+# 心跳间隔：每 N 秒将缓存值强制写入 SQLite（保证时间序列连续）
+HEARTBEAT_INTERVAL = 10
+
+# 订阅推送数据写入 SQLite 的批量 buffer 配置
+WRITE_BUFFER_SIZE = 50
+WRITE_BUFFER_TIMEOUT = 2  # 秒
+
+# 浏览节点临时连接的超时（秒）
+BROWSE_TIMEOUT = 15
 
 # Prometheus 指标
 OPC_CONNECTION_STATUS = Gauge(
@@ -45,6 +66,27 @@ OPC_NODE_COUNT = Gauge(
     'opc_node_count',
     'OPC UA 已订阅节点数量'
 )
+OPC_COLLECT_COUNT = Counter(
+    'opc_collect_total',
+    'OPC UA 采集循环次数',
+    ['status']
+)
+OPC_YIELD_COUNT = Counter(
+    'opc_yield_total',
+    'OPC UA Session 让出次数'
+)
+OPC_RESUME_COUNT = Counter(
+    'opc_resume_total',
+    'OPC UA 采集恢复次数'
+)
+OPC_PUSH_TIMEOUT_COUNT = Counter(
+    'opc_push_timeout_total',
+    'OPC UA 推送超时次数（连接异常）'
+)
+OPC_HEARTBEAT_COUNT = Counter(
+    'opc_heartbeat_total',
+    'OPC UA 心跳写入次数'
+)
 
 
 class OPCQuality:
@@ -55,64 +97,48 @@ class OPCQuality:
 
 
 class _SubHandler:
-    """asyncua 订阅回调：把推送值写入缓存字典 + SQLite 历史库，并触发等待者。"""
+    """asyncua 订阅回调：持续收集推送值，写入 buffer 待批量落库。"""
 
-    def __init__(self, cache: Dict[str, Any], notify_event: asyncio.Event,
-                 history_db: Optional[HistoryDB] = None):
-        self._cache = cache
-        self._notify = notify_event  # 每次有新数据时 set，让等待者醒来
-        self._history_db = history_db
+    def __init__(self, buffer: List[Dict[str, Any]], client_ref: 'OPCUAClient'):
+        self._buffer = buffer
+        self._client_ref = client_ref
 
     async def datachange_notification(self, node, val, data):
         node_id = node.nodeid.to_string()
+
         try:
             sc = data.monitored_item.Value.StatusCode
             is_good = sc.is_good()
         except Exception:
             is_good = val is not None
 
-        now_iso = datetime.now().isoformat()
-        quality = OPCQuality.GOOD if is_good else OPCQuality.BAD
+        if not is_good:
+            return  # 只缓存 Good 数据
 
-        self._cache[node_id] = {
+        now_iso = datetime.now().isoformat()
+        quality = OPCQuality.GOOD
+
+        self._buffer.append({
+            "node_id": node_id,
             "value": val,
             "quality": quality,
             "timestamp": now_iso,
-        }
+            "source": "push",  # 标记为推送数据
+        })
 
-        # 写入 SQLite 历史库（异步，不阻塞缓存更新）
-        if self._history_db and val is not None:
-            try:
-                # 获取服务器端时间戳（如果有）
-                source_ts = None
-                try:
-                    src = data.monitored_item.Value.SourceTimestamp
-                    if src:
-                        source_ts = src.isoformat()
-                except Exception:
-                    pass
-
-                await self._history_db.write(
-                    node_id=node_id,
-                    value=float(val) if not isinstance(val, (int, float)) else val,
-                    quality=quality,
-                    timestamp=now_iso,
-                    source_timestamp=source_ts,
-                )
-            except Exception as e:
-                logger.warning("history_write_failed", node_id=node_id, error=str(e))
-
-        # 通知所有等待者
-        self._notify.set()
-        self._notify.clear()
+        # 更新最后推送时间（核心：用于判断连接是否真正存活）
+        self._client_ref._last_push_time = time.time()
 
 
 class OPCUAClient:
     """
-    OPC UA 客户端（asyncua 按需订阅缓存模式）。
+    OPC UA 客户端（自适应采集模式 + 推送超时检测）。
 
-    启动时秒级完成，节点在首次 read_value/batch_read 时按需加入订阅。
-    已订阅节点的后续请求直接从内存缓存返回，无网络延迟。
+    - 默认保持长连接 + 订阅，数据持续推送（秒级）
+    - 检测到 Session 被占用时自动让出，客户端断开后自动恢复
+    - 推送超时 N 秒 → 视为连接异常 → 断开重连
+    - 心跳写入：每 N 秒将缓存值写入 SQLite（source=heartbeat）
+    - API 层只从内存缓存读取
     """
 
     def __init__(
@@ -128,127 +154,489 @@ class OPCUAClient:
         self.endpoint = endpoint
         self.username = username or ""
         self.password = password or ""
-        self.security_policy = security_policy
-        self.security_mode = security_mode
 
-        self._client: Optional[AsyncClient] = None
-        self._connected = False
-        self._reconnect_delay = 5
-        self._max_reconnect_attempts = 3
-
-        # 订阅
-        self._subscription = None
-        self._subscribed_node_ids: Set[str] = set()
-
-        # 缓存
+        # 缓存（最新值，API 层只读）
         self._value_cache: Dict[str, Dict[str, Any]] = {}
-        self._data_event = asyncio.Event()  # 有新数据推送时被 set
+
+        # 需要采集的节点列表
+        self._collect_nodes: Set[str] = set()
+
+        # OPC UA 客户端实例
+        self._client: Optional[AsyncClient] = None
+        self._subscription = None
+
+        # 采集循环控制
+        self._collect_task: Optional[asyncio.Task] = None
+        self._flush_task: Optional[asyncio.Task] = None
+        self._heartbeat_task: Optional[asyncio.Task] = None
+        self._running = False
+        self._last_collect_time: Optional[float] = None
+
+        # 推送超时检测：最后一次收到 datachange_notification 的时间
+        self._last_push_time: float = 0  # 0 = 从未收到过推送
+
+        # 让出 / 恢复状态
+        self._yielded = False  # 是否因 Session 被占用而让出
+        self._consecutive_failures = 0
+        self._max_failures_before_yield = 3  # 连续失败 N 次后让出
+
+        # 推送数据 buffer（批量写入 SQLite）
+        self._write_buffer: List[Dict[str, Any]] = []
+        self._buffer_lock = asyncio.Lock()
+        self._buffer_event = asyncio.Event()
 
         # SQLite 历史库
         self.history_db = HistoryDB(
             db_path=history_db_path or HistoryDB.DEFAULT_DB_PATH,
             retention_days=history_retention_days,
         )
-        self._handler = _SubHandler(self._value_cache, self._data_event, self.history_db)
-
-        # 定期轮询写入任务
-        self._poll_task: Optional[asyncio.Task] = None
-        self._last_connection_check = datetime.now()
 
     # ------------------------------------------------------------------ #
-    #  连接 / 断开                                                          #
+    #  生命周期                                                             #
     # ------------------------------------------------------------------ #
 
-    async def connect(self) -> bool:
-        """连接到 OPC UA 服务器，并建立共享订阅通道。"""
+    async def start(self) -> bool:
+        """启动采集（自适应模式）。"""
         try:
-            logger.info("opc_connection_attempt", endpoint=self.endpoint)
-
-            # 初始化 SQLite 历史库
             await self.history_db.connect()
+        except Exception as e:
+            logger.error("history_db_connect_failed", error=str(e))
+            return False
 
-            self._client = AsyncClient(self.endpoint)
+        self._running = True
 
+        # 启动批量写入任务
+        self._flush_task = asyncio.create_task(self._flush_loop())
+
+        # 启动心跳写入任务
+        self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
+
+        # 启动采集循环
+        self._collect_task = asyncio.create_task(self._collect_loop())
+        logger.info("adaptive_collect_started", mode="default_subscribe",
+                    push_timeout=PUSH_TIMEOUT,
+                    heartbeat_interval=HEARTBEAT_INTERVAL,
+                    yield_recheck=YIELD_RECHECK_INTERVAL)
+        return True
+
+    async def stop(self):
+        """停止采集。"""
+        self._running = False
+
+        # 取消采集循环
+        if self._collect_task and not self._collect_task.done():
+            self._collect_task.cancel()
+            try:
+                await self._collect_task
+            except asyncio.CancelledError:
+                pass
+            self._collect_task = None
+
+        # 取消心跳循环
+        if self._heartbeat_task and not self._heartbeat_task.done():
+            self._heartbeat_task.cancel()
+            try:
+                await self._heartbeat_task
+            except asyncio.CancelledError:
+                pass
+            self._heartbeat_task = None
+
+        # 取消 flush 循环
+        if self._flush_task and not self._flush_task.done():
+            self._flush_task.cancel()
+            try:
+                await self._flush_task
+            except asyncio.CancelledError:
+                pass
+            self._flush_task = None
+
+        # 最终 flush
+        await self._flush_buffer()
+
+        # 断开 OPC UA
+        await self._disconnect_opc()
+
+        OPC_CONNECTION_STATUS.set(0)
+        await self.history_db.close()
+        logger.info("adaptive_collect_stopped")
+
+    # ------------------------------------------------------------------ #
+    #  节点注册（由 API 层调用）                                              #
+    # ------------------------------------------------------------------ #
+
+    def add_nodes(self, node_ids: List[str]):
+        """注册需要采集的节点。"""
+        new_ids = [nid for nid in node_ids if nid not in self._collect_nodes]
+        if new_ids:
+            self._collect_nodes.update(new_ids)
+            OPC_NODE_COUNT.set(len(self._collect_nodes))
+            logger.info("nodes_registered", count=len(new_ids), total=len(self._collect_nodes))
+
+            # 如果已连接，动态添加新节点到现有订阅
+            if self._subscription and self._client:
+                asyncio.create_task(self._add_nodes_to_subscription(new_ids))
+
+    async def _add_nodes_to_subscription(self, node_ids: List[str]):
+        """动态添加节点到现有订阅（不重建连接）。"""
+        try:
+            nodes = [self._client.get_node(nid) for nid in node_ids]
+            await self._subscription.subscribe_data_change(nodes)
+            logger.info("nodes_added_to_subscription", count=len(node_ids))
+        except Exception as e:
+            logger.warning("add_nodes_to_sub_failed", error=str(e))
+
+    # ------------------------------------------------------------------ #
+    #  OPC UA 连接 / 断开                                                    #
+    # ------------------------------------------------------------------ #
+
+    async def _connect_opc(self) -> bool:
+        """建立 OPC UA 连接并创建订阅。"""
+        try:
+            client = AsyncClient(self.endpoint)
             if self.username:
-                self._client.set_user(self.username)
+                client.set_user(self.username)
             if self.password:
-                self._client.set_password(self.password)
+                client.set_password(self.password)
+            client.session_timeout = 60000
 
-            self._client.session_timeout = 60000
+            await client.connect()
+            self._client = client
 
-            await self._client.connect()
-            self._connected = True
-            logger.info("opc_connection_success", endpoint=self.endpoint)
+            # 创建订阅 + handler（传入 self 引用，用于更新 _last_push_time）
+            handler = _SubHandler(self._write_buffer, self)
+            self._subscription = await client.create_subscription(500, handler)
 
-            # 建立共享订阅通道（500ms 推送间隔）
-            self._subscription = await self._client.create_subscription(
-                500, self._handler
-            )
+            # 订阅所有已注册节点
+            if self._collect_nodes:
+                nodes = [client.get_node(nid) for nid in self._collect_nodes]
+                await self._subscription.subscribe_data_change(nodes)
+                logger.info("opc_subscribed", count=len(self._collect_nodes))
+
+            # 连接成功，重置推送超时计时
+            # 注意：不在这里设置 _last_push_time，等真正的推送来更新
             OPC_CONNECTION_STATUS.set(1)
-            logger.info("opc_subscription_ready")
-
-            # 启动定期轮询写入（每60秒缓存→SQLite）
-            self._poll_task = asyncio.create_task(self._poll_cache_to_history())
-            logger.info("poll_task_started", interval_seconds=60)
-
             return True
 
         except Exception as e:
-            self._connected = False
+            err_str = str(e).lower()
+            is_session_limit = "session" in err_str and ("too many" in err_str or "max" in err_str)
+
+            if is_session_limit:
+                logger.warning("session_occupied",
+                             error=str(e),
+                             message="客户端正在使用 Session，自动让出")
+            else:
+                logger.error("opc_connect_failed", error=str(e))
+
+            self._client = None
+            self._subscription = None
             OPC_CONNECTION_STATUS.set(0)
-            logger.error("opc_connection_failed", endpoint=self.endpoint, error=str(e))
             return False
 
-    async def disconnect(self):
-        """断开连接并清理订阅。"""
-        self._connected = False
-
-        # 取消轮询任务
-        if self._poll_task and not self._poll_task.done():
-            self._poll_task.cancel()
-            try:
-                await self._poll_task
-            except asyncio.CancelledError:
-                pass
-            self._poll_task = None
-            logger.info("poll_task_stopped")
-
+    async def _disconnect_opc(self):
+        """断开 OPC UA 连接。"""
         try:
             if self._subscription:
-                try:
-                    await self._subscription.delete()
-                except Exception:
-                    pass
+                await self._subscription.delete()
                 self._subscription = None
+        except Exception:
+            pass
+
+        try:
             if self._client:
                 await self._client.disconnect()
-            # 关闭 SQLite 历史库（会自动 flush buffer）
-            await self.history_db.close()
-            OPC_CONNECTION_STATUS.set(0)
-            logger.info("opc_disconnected")
-        except Exception as e:
-            logger.error("opc_disconnect_failed", error=str(e))
+                self._client = None
+        except Exception:
+            pass
+
+        OPC_CONNECTION_STATUS.set(0)
 
     # ------------------------------------------------------------------ #
-    #  连接状态                                                              #
+    #  自适应采集循环                                                        #
+    # ------------------------------------------------------------------ #
+
+    async def _collect_loop(self):
+        """
+        自适应采集循环：
+        - 默认：保持长连接 + 订阅，数据持续推送
+        - 推送超时：N 秒内没收到任何推送 → 视为连接异常 → 断开重连
+        - 让出：检测到 Session 被占用，断开并定期重试
+        - 恢复：重试成功后恢复长连接采集
+        """
+        # 初始连接成功后的宽限期：给 OPC 服务器几秒时间推送第一批数据
+        initial_grace = 15  # 首次连接后等 15 秒才开始检测推送超时
+        connected_at = 0
+
+        while self._running:
+            try:
+                # ---- 已让出状态：定期尝试重连 ----
+                if self._yielded:
+                    await asyncio.sleep(YIELD_RECHECK_INTERVAL)
+                    if not self._running:
+                        break
+
+                    logger.info("yield_recheck",
+                               message="尝试重连，检查客户端是否已断开")
+                    success = await self._connect_opc()
+                    if success:
+                        self._yielded = False
+                        self._consecutive_failures = 0
+                        connected_at = time.time()
+                        OPC_RESUME_COUNT.inc()
+                        logger.info("collect_resumed",
+                                   message="Session 已空闲，恢复高速采集")
+                    continue
+
+                # ---- 正常状态：保持连接 ----
+                if self._client is None:
+                    # 首次连接或连接丢失后重连
+                    success = await self._connect_opc()
+                    if not success:
+                        self._consecutive_failures += 1
+
+                        if self._consecutive_failures >= self._max_failures_before_yield:
+                            self._yielded = True
+                            OPC_YIELD_COUNT.inc()
+                            logger.warning("session_yielded",
+                                         consecutive_failures=self._consecutive_failures,
+                                         message="连续失败，让出 Session，等待客户端释放")
+                        else:
+                            await asyncio.sleep(5)  # 短暂重试
+                        continue
+
+                    # 连接成功，重置计数器和宽限期
+                    self._consecutive_failures = 0
+                    connected_at = time.time()
+                    logger.info("opc_connected",
+                               registered_nodes=len(self._collect_nodes))
+
+                # ---- 已连接：检查推送是否正常 ----
+                await asyncio.sleep(2)
+
+                if not self._running:
+                    break
+
+                # 检查 session 对象是否还在
+                if not (hasattr(self._client, 'session') and self._client.session):
+                    logger.warning("session_lost", message="Session 丢失，准备重连")
+                    self._client = None
+                    self._subscription = None
+                    OPC_CONNECTION_STATUS.set(0)
+                    continue
+
+                # 检查推送超时（核心：基于真实推送数据，而不是 session 对象）
+                if self._last_push_time > 0:
+                    # 已经收到过推送，检查是否超时
+                    push_age = time.time() - self._last_push_time
+                    if push_age > PUSH_TIMEOUT:
+                        OPC_PUSH_TIMEOUT_COUNT.inc()
+                        logger.warning("push_timeout",
+                                      push_age_seconds=int(push_age),
+                                      push_timeout=PUSH_TIMEOUT,
+                                      message=f"{PUSH_TIMEOUT} 秒内未收到推送，视为连接异常，断开重连")
+                        # 主动断开，触发重连
+                        await self._disconnect_opc()
+                        self._client = None
+                        self._subscription = None
+                        self._last_push_time = 0  # 重置
+                        continue
+                else:
+                    # 还没收到过推送（刚连上），给一个宽限期
+                    if (time.time() - connected_at) > initial_grace:
+                        logger.warning("push_never_received",
+                                      grace_seconds=initial_grace,
+                                      message=f"连接后 {initial_grace} 秒内未收到任何推送，断开重连")
+                        OPC_PUSH_TIMEOUT_COUNT.inc()
+                        await self._disconnect_opc()
+                        self._client = None
+                        self._subscription = None
+                        continue
+
+                # 一切正常
+                OPC_COLLECT_COUNT.labels("active").inc()
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error("collect_loop_error", error=str(e))
+                OPC_COLLECT_COUNT.labels("error").inc()
+                self._client = None
+                self._subscription = None
+                OPC_CONNECTION_STATUS.set(0)
+                await asyncio.sleep(5)
+
+    # ------------------------------------------------------------------ #
+    #  心跳写入（保证时间序列连续）                                           #
+    # ------------------------------------------------------------------ #
+
+    async def _heartbeat_loop(self):
+        """
+        定期将当前缓存值写入 SQLite，标记 source=heartbeat。
+        保证时间序列连续，且能区分真实变化和死值。
+        只在连接正常且有缓存数据时才写心跳。
+        """
+        while self._running:
+            try:
+                await asyncio.sleep(HEARTBEAT_INTERVAL)
+            except asyncio.CancelledError:
+                break
+
+            if not self._running:
+                break
+
+            # 只在连接正常时才写心跳
+            if self._yielded or self._client is None:
+                continue
+
+            # 推送超时期间不写心跳（说明连接已经异常了）
+            if self._last_push_time > 0:
+                push_age = time.time() - self._last_push_time
+                if push_age > PUSH_TIMEOUT:
+                    continue  # 推送已超时，不写心跳
+
+            # 将缓存中的值写入 SQLite，标记为 heartbeat
+            if not self._value_cache:
+                continue
+
+            now_iso = datetime.now().isoformat()
+            heartbeat_batch = []
+
+            async with self._buffer_lock:
+                for node_id, cached in self._value_cache.items():
+                    # 跳过最近 3 秒内刚被推送更新的值（避免心跳和推送重复）
+                    try:
+                        cached_ts = datetime.fromisoformat(cached["timestamp"])
+                        if (datetime.now() - cached_ts).total_seconds() < 3:
+                            continue
+                    except Exception:
+                        pass
+
+                    heartbeat_batch.append({
+                        "node_id": node_id,
+                        "value": cached["value"],
+                        "quality": cached["quality"],
+                        "timestamp": now_iso,
+                        "source": "heartbeat",
+                    })
+
+            if heartbeat_batch:
+                async with self._buffer_lock:
+                    self._write_buffer.extend(heartbeat_batch)
+                    self._buffer_event.set()
+
+                OPC_HEARTBEAT_COUNT.inc()
+                logger.debug("heartbeat_written",
+                           nodes=len(heartbeat_batch),
+                           interval=HEARTBEAT_INTERVAL)
+
+    # ------------------------------------------------------------------ #
+    #  批量写入 SQLite                                                      #
+    # ------------------------------------------------------------------ #
+
+    async def _flush_loop(self):
+        """后台定期 flush buffer 到 SQLite。"""
+        while self._running:
+            try:
+                await asyncio.wait_for(self._buffer_event.wait(), timeout=WRITE_BUFFER_TIMEOUT)
+                self._buffer_event.clear()
+            except asyncio.TimeoutError:
+                pass
+
+            if self._write_buffer:
+                await self._flush_buffer()
+
+    async def _flush_buffer(self):
+        """将 buffer 中的数据批量写入 SQLite 和缓存。"""
+        async with self._buffer_lock:
+            if not self._write_buffer:
+                return
+
+            batch = self._write_buffer[:]
+            self._write_buffer.clear()
+
+        # 更新缓存（只保留最新值，推送数据优先于心跳）
+        for item in batch:
+            # 推送数据总是覆盖心跳，心跳不覆盖推送
+            existing = self._value_cache.get(item["node_id"])
+            source = item.get("source", "push")
+            existing_source = existing.get("source", "push") if existing else "push"
+
+            if source == "push" or existing is None:
+                self._value_cache[item["node_id"]] = {
+                    "value": item["value"],
+                    "quality": item["quality"],
+                    "timestamp": item["timestamp"],
+                    "source": source,
+                }
+            # source == "heartbeat" 且 existing 是 push → 不覆盖，跳过
+
+        self._last_collect_time = time.time()
+
+        # 写入 SQLite
+        written = 0
+        for item in batch:
+            val = item.get("value")
+            if val is None:
+                continue
+            try:
+                await self.history_db.write(
+                    node_id=item["node_id"],
+                    value=float(val) if not isinstance(val, (int, float)) else val,
+                    quality=item["quality"],
+                    timestamp=item["timestamp"],
+                    source=item.get("source", "push"),
+                )
+                written += 1
+            except Exception as e:
+                logger.warning("history_write_failed",
+                             node_id=item["node_id"], error=str(e))
+
+        if written > 0:
+            logger.debug("history_db_flushed", count=written)
+
+    # ------------------------------------------------------------------ #
+    #  连接状态 / 缓存新鲜度                                                  #
     # ------------------------------------------------------------------ #
 
     def is_connected(self) -> bool:
-        return self._connected and self._client is not None
+        """返回是否有活跃的 OPC UA 连接。"""
+        if self._yielded:
+            return False
+        if self._client is None:
+            return False
+        # 检查推送是否超时
+        if self._last_push_time > 0:
+            if (time.time() - self._last_push_time) > PUSH_TIMEOUT:
+                return False
+        return True
 
-    async def _ensure_connected(self) -> bool:
-        if self.is_connected():
-            return True
-        logger.warning("opc_reconnecting")
-        for attempt in range(self._max_reconnect_attempts):
-            if await self.connect():
-                return True
-            if attempt < self._max_reconnect_attempts - 1:
-                await asyncio.sleep(self._reconnect_delay)
-        return False
+    def is_yielded(self) -> bool:
+        """返回是否因 Session 被占用而让出。"""
+        return self._yielded
+
+    def get_cache_freshness(self) -> int:
+        """返回上次数据更新距今的秒数。"""
+        if not self._last_collect_time:
+            return -1
+        return int(time.time() - self._last_collect_time)
+
+    def get_collect_status(self) -> str:
+        """返回采集状态描述。"""
+        if self._yielded:
+            return "yielded"
+        if self._client is None:
+            return "reconnecting"
+        # 检查推送是否超时
+        if self._last_push_time > 0:
+            if (time.time() - self._last_push_time) > PUSH_TIMEOUT:
+                return "push_timeout"
+        elif self._last_push_time == 0:
+            # 已连接但还没收到过推送
+            return "waiting_first_push"
+        return "active"
 
     # ------------------------------------------------------------------ #
-    #  浏览节点                                                              #
+    #  浏览节点（临时短连接）                                                  #
     # ------------------------------------------------------------------ #
 
     async def browse_nodes(
@@ -259,133 +647,93 @@ class OPCUAClient:
         max_nodes: int = 200,
         offset: int = 0,
     ) -> List[Dict[str, Any]]:
-        """浏览节点列表（支持分页）。"""
-        if not await self._ensure_connected():
-            raise ConnectionError("OPC UA 服务器连接失败")
-
+        """浏览节点列表（临时短连接，用完即释放 Session）。"""
         OPC_REQUEST_COUNT.labels("browse").inc()
+        t0 = time.time()
 
-        start_node = (
-            self._client.get_node(node_id)
-            if node_id
-            else self._client.get_objects_node()
-        )
-        children = await start_node.get_children()
-        paginated = children[offset: offset + max_nodes]
+        client: Optional[AsyncClient] = None
+        try:
+            client = AsyncClient(self.endpoint)
+            if self.username:
+                client.set_user(self.username)
+            if self.password:
+                client.set_password(self.password)
+            client.session_timeout = 60000
+            await client.connect()
 
-        nodes = []
-        for child in paginated:
-            try:
-                nid = child.nodeid.to_string()
-                ns = child.nodeid.NamespaceIndex
+            start_node = (
+                client.get_node(node_id)
+                if node_id
+                else client.get_objects_node()
+            )
+            children = await start_node.get_children()
+            paginated = children[offset: offset + max_nodes]
 
-                if namespace is not None and ns != namespace:
+            nodes = []
+            for child in paginated:
+                try:
+                    nid = child.nodeid.to_string()
+                    ns = child.nodeid.NamespaceIndex
+
+                    if namespace is not None and ns != namespace:
+                        continue
+
+                    try:
+                        browse_name = (await child.read_browse_name()).Name
+                    except Exception:
+                        browse_name = nid
+
+                    try:
+                        display_name = (await child.read_display_name()).Text
+                    except Exception:
+                        display_name = browse_name
+
+                    try:
+                        node_class = str(await child.read_node_class())
+                    except Exception:
+                        node_class = "Unknown"
+
+                    cached = self._value_cache.get(nid)
+                    node_info: Dict[str, Any] = {
+                        "node_id": nid,
+                        "namespace": ns,
+                        "browse_name": browse_name,
+                        "display_name": display_name,
+                        "node_class": node_class,
+                    }
+                    if cached:
+                        node_info["value"] = cached.get("value")
+                        node_info["quality"] = cached.get("quality")
+                        node_info["timestamp"] = cached.get("timestamp")
+
+                    nodes.append(node_info)
+
+                except Exception as e:
+                    logger.warning("browse_child_failed", error=str(e))
                     continue
 
+            OPC_REQUEST_DURATION.labels("browse").observe(time.time() - t0)
+            return nodes
+
+        except Exception as e:
+            logger.error("browse_failed", error=str(e))
+            raise
+        finally:
+            if client:
                 try:
-                    browse_name = (await child.read_browse_name()).Name
+                    await client.disconnect()
                 except Exception:
-                    browse_name = nid
-
-                try:
-                    display_name = (await child.read_display_name()).Text
-                except Exception:
-                    display_name = browse_name
-
-                try:
-                    node_class = str(await child.read_node_class())
-                except Exception:
-                    node_class = "Unknown"
-
-                cached = self._value_cache.get(nid)
-                node_info: Dict[str, Any] = {
-                    "node_id": nid,
-                    "namespace": ns,
-                    "browse_name": browse_name,
-                    "display_name": display_name,
-                    "node_class": node_class,
-                }
-                if cached:
-                    node_info["value"] = cached.get("value")
-                    node_info["quality"] = cached.get("quality")
-                    node_info["timestamp"] = cached.get("timestamp")
-
-                nodes.append(node_info)
-
-            except Exception as e:
-                logger.warning("browse_child_failed", error=str(e))
-                continue
-
-        return nodes
+                    pass
 
     # ------------------------------------------------------------------ #
-    #  按需订阅工具                                                           #
+    #  读值（从缓存读取）                                                     #
     # ------------------------------------------------------------------ #
-
-    async def _ensure_subscribed(self, node_ids: List[str]) -> None:
-        """确保给定节点列表已加入订阅（首次按需添加）。"""
-        if not self._subscription:
-            raise ConnectionError("订阅通道未就绪")
-
-        new_ids = [nid for nid in node_ids if nid not in self._subscribed_node_ids]
-        if not new_ids:
-            return
-
-        nodes = [self._client.get_node(nid) for nid in new_ids]
-        await self._subscription.subscribe_data_change(nodes)
-        for nid in new_ids:
-            self._subscribed_node_ids.add(nid)
-        OPC_NODE_COUNT.set(len(self._subscribed_node_ids))
-        logger.debug("opc_nodes_subscribed", count=len(new_ids))
-
-    # ------------------------------------------------------------------ #
-    #  读值（从订阅缓存读取）                                                 #
-    # ------------------------------------------------------------------ #
-
-    async def _wait_for_nodes(self, node_ids: List[str], timeout: float = 5.0) -> None:
-        """等待给定节点列表全部出现在缓存中（由订阅推送触发）。"""
-        deadline = asyncio.get_event_loop().time() + timeout
-        while True:
-            if all(nid in self._value_cache for nid in node_ids):
-                return
-            remaining = deadline - asyncio.get_event_loop().time()
-            if remaining <= 0:
-                return
-            try:
-                # 等待新数据通知，最多等 remaining 秒
-                await asyncio.wait_for(
-                    asyncio.shield(self._data_event.wait()),
-                    timeout=min(remaining, 1.0)
-                )
-            except asyncio.TimeoutError:
-                pass
 
     async def read_value(self, node_id: str) -> Dict[str, Any]:
-        """
-        读取节点当前值。
-        - 已订阅：直接从缓存返回
-        - 未订阅：按需订阅，等待首次推送（最多 3 秒）
-        """
-        if not await self._ensure_connected():
-            raise ConnectionError("OPC UA 服务器连接失败")
-
+        """读取节点当前值（从缓存读取，并注册到采集列表）。"""
         OPC_REQUEST_COUNT.labels("read_value").inc()
 
-        # 已缓存则直接返回
-        cached = self._value_cache.get(node_id)
-        if cached:
-            return {
-                "node_id": node_id,
-                "value": cached["value"],
-                "quality": cached["quality"],
-                "timestamp": cached["timestamp"],
-                "data_type": type(cached["value"]).__name__ if cached["value"] is not None else "None",
-                "source": "cache",
-            }
-
-        # 按需订阅，等待推送
-        await self._ensure_subscribed([node_id])
-        await self._wait_for_nodes([node_id], timeout=3.0)
+        self.add_nodes([node_id])
 
         cached = self._value_cache.get(node_id)
         if cached:
@@ -395,29 +743,22 @@ class OPCUAClient:
                 "quality": cached["quality"],
                 "timestamp": cached["timestamp"],
                 "data_type": type(cached["value"]).__name__ if cached["value"] is not None else "None",
-                "source": "subscribed",
+                "source": cached.get("source", "cache"),
             }
+
         return {
             "node_id": node_id,
             "value": None,
             "quality": OPCQuality.BAD,
             "timestamp": datetime.now().isoformat(),
             "data_type": "None",
-            "source": "timeout",
+            "source": "not_yet_collected",
         }
 
     async def batch_read(self, node_ids: List[str]) -> List[Dict[str, Any]]:
-        """批量读取节点值（优先缓存，未缓存的按需订阅）。"""
-        if not await self._ensure_connected():
-            raise ConnectionError("OPC UA 服务器连接失败")
-
+        """批量读取节点值（从缓存读取，并注册到采集列表）。"""
         OPC_REQUEST_COUNT.labels("batch_read").inc()
-
-        # 找出未缓存节点，一次性批量订阅
-        uncached = [nid for nid in node_ids if nid not in self._value_cache]
-        if uncached:
-            await self._ensure_subscribed(uncached)
-            await self._wait_for_nodes(uncached, timeout=5.0)
+        self.add_nodes(node_ids)
 
         results = []
         for nid in node_ids:
@@ -429,7 +770,7 @@ class OPCUAClient:
                     "quality": cached["quality"],
                     "timestamp": cached["timestamp"],
                     "data_type": type(cached["value"]).__name__ if cached["value"] is not None else "None",
-                    "source": "cache" if nid not in uncached else "subscribed",
+                    "source": cached.get("source", "cache"),
                     "error": None,
                 })
             else:
@@ -439,13 +780,13 @@ class OPCUAClient:
                     "quality": OPCQuality.BAD,
                     "timestamp": datetime.now().isoformat(),
                     "data_type": "None",
-                    "source": "timeout",
-                    "error": "订阅超时，未收到数据",
+                    "source": "not_yet_collected",
+                    "error": "节点尚未采集到数据",
                 })
         return results
 
     # ------------------------------------------------------------------ #
-    #  历史数据（占位）                                                       #
+    #  历史数据（从 SQLite 查询）                                              #
     # ------------------------------------------------------------------ #
 
     async def read_history(
@@ -481,49 +822,14 @@ class OPCUAClient:
         return len(self._value_cache)
 
     def get_subscribed_count(self) -> int:
-        return len(self._subscribed_node_ids)
+        return len(self._collect_nodes)
 
-    # ------------------------------------------------------------------ #
-    #  定期轮询写入（缓存→SQLite）                                          #
-    # ------------------------------------------------------------------ #
+    def get_last_push_time(self) -> Optional[float]:
+        """返回最后一次收到推送的时间戳，0 表示从未收到。"""
+        return self._last_push_time
 
-    async def _poll_cache_to_history(self) -> None:
-        """
-        后台任务：每60秒遍历缓存，将所有已订阅节点的当前值强制写入 SQLite。
-        解决 OPC UA 服务器"值不变不推送"导致历史数据稀疏的问题。
-        """
-        poll_interval = 60.0
-        while self._connected:
-            try:
-                await asyncio.sleep(poll_interval)
-                if not self._connected:
-                    break
-
-                if not self._value_cache:
-                    continue
-
-                now_iso = datetime.now().isoformat()
-                written = 0
-                for nid, entry in self._value_cache.items():
-                    val = entry.get("value")
-                    if val is None:
-                        continue
-                    quality = entry.get("quality", OPCQuality.GOOD)
-                    try:
-                        await self.history_db.write(
-                            node_id=nid,
-                            value=float(val) if not isinstance(val, (int, float)) else val,
-                            quality=quality,
-                            timestamp=now_iso,
-                        )
-                        written += 1
-                    except Exception as e:
-                        logger.warning("poll_write_failed", node_id=nid, error=str(e))
-
-                logger.debug("poll_write_done", nodes_written=written, total_cached=len(self._value_cache))
-
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                logger.error("poll_task_error", error=str(e))
-                await asyncio.sleep(poll_interval)
+    def get_push_age(self) -> int:
+        """返回最后一次推送距今的秒数。-1 表示从未收到。"""
+        if self._last_push_time == 0:
+            return -1
+        return int(time.time() - self._last_push_time)

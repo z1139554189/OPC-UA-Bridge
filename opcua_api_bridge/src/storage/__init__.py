@@ -101,12 +101,22 @@ class HistoryDB:
                 timestamp TEXT NOT NULL,
                 value REAL,
                 quality TEXT,
-                source_timestamp TEXT
+                source_timestamp TEXT,
+                source TEXT DEFAULT 'push'
             );
             CREATE INDEX IF NOT EXISTS idx_{safe_name}_ts ON [{safe_name}](timestamp);
         """
         await self._db.executescript(sql)
         self._tables_created.add(safe_name)
+
+        # 兼容旧表：如果表已存在但没有 source 列，自动添加
+        try:
+            await self._db.execute(
+                f"ALTER TABLE [{safe_name}] ADD COLUMN source TEXT DEFAULT 'push'"
+            )
+        except Exception:
+            pass  # 列已存在，忽略
+
         return safe_name
 
     # ------------------------------------------------------------------ #
@@ -120,9 +130,10 @@ class HistoryDB:
         quality: str,
         timestamp: str,
         source_timestamp: Optional[str] = None,
+        source: str = "push",
     ) -> None:
         """写入一条历史数据（先进 buffer，满足条件后批量刷盘）"""
-        self._buffer.append((node_id, timestamp, value, quality, source_timestamp))
+        self._buffer.append((node_id, timestamp, value, quality, source_timestamp, source))
 
         # 检查是否该 flush
         now = time.monotonic()
@@ -148,13 +159,13 @@ class HistoryDB:
         try:
             # 按 node_id 分组，批量写入各自表
             by_node: Dict[str, List[tuple]] = {}
-            for node_id, ts, val, quality, src_ts in buffer_copy:
-                by_node.setdefault(node_id, []).append((ts, val, quality, src_ts))
+            for node_id, ts, val, quality, src_ts, source in buffer_copy:
+                by_node.setdefault(node_id, []).append((ts, val, quality, src_ts, source))
 
             for node_id, rows in by_node.items():
                 table_name = await self._ensure_table(node_id)
                 await self._db.executemany(
-                    f"INSERT INTO [{table_name}] (timestamp, value, quality, source_timestamp) VALUES (?, ?, ?, ?)",
+                    f"INSERT INTO [{table_name}] (timestamp, value, quality, source_timestamp, source) VALUES (?, ?, ?, ?, ?)",
                     rows,
                 )
 
@@ -194,7 +205,7 @@ class HistoryDB:
             return []
 
         sql = f"""
-            SELECT timestamp, value, quality, source_timestamp
+            SELECT timestamp, value, quality, source_timestamp, source
             FROM [{table_name}]
             WHERE timestamp >= ? AND timestamp <= ?
             ORDER BY timestamp ASC
@@ -209,6 +220,7 @@ class HistoryDB:
                 "value": round(row["value"], 2) if row["value"] is not None else None,
                 "quality": row["quality"],
                 "source_timestamp": row["source_timestamp"],
+                "source": row["source"],
             }
             for row in rows
         ]
