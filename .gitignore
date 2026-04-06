@@ -5,7 +5,6 @@
 __pycache__/
 *.pyc
 *.pyo
-.venv_find
 *.egg-info/
 dist/
 build/
@@ -20,56 +19,17 @@ data/
 logs/
 reporter/logs/
 reporter/output/
-
-# ===== 工作区临时文件 =====
-browser_screenshots/
-_test_browser.py
-node-installer.msi
-node.zip
-query
-auto_git_push.bat
-auto_git_push.ps1
-auto_git_push.vbs
-
-# ===== WorkBuddy 本地配置 =====
-.workbuddy/*
-!.workbuddy/memory/
-.workbuddy/memory/MEMORY.md
-
-# ===== 调试脚本（根目录临时文件） =====
-opcua_api_bridge/test_api.py
-opcua_api_bridge/test_async_wait.py
-opcua_api_bridge/test_new_client.py
-opcua_api_bridge/test_nodeid_format.py
-opcua_api_bridge/test_ondemand_sub.py
-opcua_api_bridge/test_opc_connection.py
-opcua_api_bridge/test_opc_detailed.py
-opcua_api_bridge/test_read_direct.py
-opcua_api_bridge/test_read_direct2.py
-opcua_api_bridge/test_sub.py
-opcua_api_bridge/test_sub2.py
-opcua_api_bridge/test_sub3.py
-opcua_api_bridge/test_sub_new.py
-opcua_api_bridge/explore_node.py
-opcua_api_bridge/explore_via_api.py
-opcua_api_bridge/find_node.py
-opcua_api_bridge/probe_ha.py
-opcua_api_bridge/probe_ha2.py
-opcua_api_bridge/probe_history.py
-opcua_api_bridge/discover_opc_servers.py
-opcua_api_bridge/test_read_value.py
-opcua_api_bridge/test_read_values.py
-opcua_api_bridge/test_socket_connection.py
-opcua_api_bridge/test_statuscode.py
-opcua_api_bridge/test_subscription.py
-opcua_api_bridge/verify_history.py
-opcua_api_bridge/reporter/scheduler.log
-opcua_api_bridge/reporter/alert.log
-opcua_api_bridge/reporter/output/
-opcua_api_bridge/reporter/*.xlsx
+reporter/scheduler.log
+reporter/alert.log
+reporter/*.xlsx
 
 # ===== IDE =====
 .vscode/
 .idea/
 *.swp
 *.swo
+
+# ===== WorkBuddy 本地配置 =====
+.workbuddy/*
+!.workbuddy/memory/
+.workbuddy/memory/MEMORY.md
