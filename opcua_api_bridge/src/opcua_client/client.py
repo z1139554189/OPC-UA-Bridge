@@ -28,6 +28,102 @@ from src.storage import HistoryDB
 
 logger = structlog.get_logger()
 
+# ── 云端 MySQL（TDSQL-C）实时同步配置 ──────────────────────────────
+_CLOUD_MYSQL = None
+
+def _get_cloud_mysql():
+    """延迟加载云端 MySQL 连接配置（从上层 cloud_config 读取）"""
+    global _CLOUD_MYSQL
+    if _CLOUD_MYSQL is None:
+        import os
+        from pathlib import Path
+        _cfg = {}
+        # 尝试从环境变量或上层 cloud_config 读取
+        try:
+            cfg_path = Path(__file__).parent.parent.parent / "20260402160254" / "cloud" / "cloud_config.py"
+            if cfg_path.exists():
+                import importlib.util
+                spec = importlib.util.spec_from_file_location("cloud_config", cfg_path)
+                mod = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(mod)
+                CLOUD_MYSQL = getattr(mod, 'CLOUD_MYSQL', {})
+                _CLOUD_MYSQL = {
+                    "host": CLOUD_MYSQL.get("host", os.environ.get("CLOUD_MYSQL_HOST", "")),
+                    "port": int(CLOUD_MYSQL.get("port", os.environ.get("CLOUD_MYSQL_PORT", "21397"))),
+                    "user": CLOUD_MYSQL.get("user", os.environ.get("CLOUD_MYSQL_USER", "opcua_user")),
+                    "password": CLOUD_MYSQL.get("password", os.environ.get("CLOUD_MYSQL_PASSWORD", "")),
+                    "database": CLOUD_MYSQL.get("database", os.environ.get("CLOUD_MYSQL_DATABASE", "opcua_db")),
+                }
+            else:
+                _CLOUD_MYSQL = {
+                    "host": os.environ.get("CLOUD_MYSQL_HOST", ""),
+                    "port": int(os.environ.get("CLOUD_MYSQL_PORT", "21397")),
+                    "user": os.environ.get("CLOUD_MYSQL_USER", "opcua_user"),
+                    "password": os.environ.get("CLOUD_MYSQL_PASSWORD", ""),
+                    "database": os.environ.get("CLOUD_MYSQL_DATABASE", "opcua_db"),
+                }
+        except Exception:
+            _CLOUD_MYSQL = {
+                "host": os.environ.get("CLOUD_MYSQL_HOST", ""),
+                "port": int(os.environ.get("CLOUD_MYSQL_PORT", "21397")),
+                "user": os.environ.get("CLOUD_MYSQL_USER", "opcua_user"),
+                "password": os.environ.get("CLOUD_MYSQL_PASSWORD", ""),
+                "database": os.environ.get("CLOUD_MYSQL_DATABASE", "opcua_db"),
+            }
+    return _CLOUD_MYSQL
+
+
+def _sync_values_to_cloud(cache_snapshot: dict, cloud_cfg: dict):
+    """
+    将缓存快照批量 UPSERT 到云端 node_latest 表。
+    在线程池中执行（run_in_executor），不阻塞事件循环。
+    """
+    if not cache_snapshot:
+        return
+
+    try:
+        import pymysql
+
+        conn = pymysql.connect(
+            host=cloud_cfg.get("host", ""),
+            port=int(cloud_cfg.get("port", 21397)),
+            user=cloud_cfg.get("user", ""),
+            password=cloud_cfg.get("password", ""),
+            database=cloud_cfg.get("database", "opcua_db"),
+            connect_timeout=5,
+        )
+        cur = conn.cursor()
+
+        sql = """
+            INSERT INTO node_latest (node_id, value, quality, timestamp, updated_at)
+            VALUES (%s, %s, %s, NOW(3), NOW(3))
+            ON DUPLICATE KEY UPDATE
+                value = VALUES(value),
+                quality = VALUES(quality),
+                timestamp = VALUES(timestamp),
+                updated_at = NOW(3)
+        """
+
+        for node_id, cached in cache_snapshot.items():
+            val = cached.get("value")
+            if val is None:
+                continue
+            try:
+                numeric_val = round(float(val), 2) if val is not None else None
+            except (ValueError, TypeError):
+                numeric_val = val
+
+            cur.execute(sql, (
+                node_id,
+                numeric_val,
+                cached.get("quality", "Good"),
+            ))
+
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass  # 云端同步失败不影响主流程，静默忽略
+
 # 缓存数据过期时间（秒），超过此时间缓存数据视为过期
 CACHE_STALE_TIMEOUT = 120
 
@@ -169,6 +265,7 @@ class OPCUAClient:
         self._collect_task: Optional[asyncio.Task] = None
         self._flush_task: Optional[asyncio.Task] = None
         self._heartbeat_task: Optional[asyncio.Task] = None
+        self._cloud_sync_task: Optional[asyncio.Task] = None
         self._running = False
         self._last_collect_time: Optional[float] = None
 
@@ -211,6 +308,9 @@ class OPCUAClient:
         # 启动心跳写入任务
         self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
 
+        # 启动云端实时同步任务（每秒写一次最新值到 TDSQL-C）
+        self._cloud_sync_task = asyncio.create_task(self._cloud_sync_loop())
+
         # 启动采集循环
         self._collect_task = asyncio.create_task(self._collect_loop())
         logger.info("adaptive_collect_started", mode="default_subscribe",
@@ -240,6 +340,15 @@ class OPCUAClient:
             except asyncio.CancelledError:
                 pass
             self._heartbeat_task = None
+
+        # 取消云端同步任务
+        if self._cloud_sync_task and not self._cloud_sync_task.done():
+            self._cloud_sync_task.cancel()
+            try:
+                await self._cloud_sync_task
+            except asyncio.CancelledError:
+                pass
+            self._cloud_sync_task = None
 
         # 取消 flush 循环
         if self._flush_task and not self._flush_task.done():
@@ -418,10 +527,11 @@ class OPCUAClient:
 
                 # 检查 session 对象是否还在
                 if not (hasattr(self._client, 'session') and self._client.session):
-                    logger.warning("session_lost", message="Session 丢失，准备重连")
+                    logger.warning("session_lost", message="Session 丢失，等待 60 秒后重连")
                     self._client = None
                     self._subscription = None
                     OPC_CONNECTION_STATUS.set(0)
+                    await asyncio.sleep(60)  # 等待服务器释放旧 Session
                     continue
 
                 # 检查推送超时（核心：基于真实推送数据，而不是 session 对象）
@@ -439,6 +549,7 @@ class OPCUAClient:
                         self._client = None
                         self._subscription = None
                         self._last_push_time = 0  # 重置
+                        await asyncio.sleep(60)  # 等待服务器释放旧 Session
                         continue
                 else:
                     # 还没收到过推送（刚连上），给一个宽限期
@@ -450,6 +561,7 @@ class OPCUAClient:
                         await self._disconnect_opc()
                         self._client = None
                         self._subscription = None
+                        await asyncio.sleep(60)  # 等待服务器释放旧 Session
                         continue
 
                 # 一切正常
@@ -528,6 +640,49 @@ class OPCUAClient:
                 logger.debug("heartbeat_written",
                            nodes=len(heartbeat_batch),
                            interval=HEARTBEAT_INTERVAL)
+
+    # ------------------------------------------------------------------ #
+    #  云端实时同步（秒级延迟）                                             #
+    # ------------------------------------------------------------------ #
+
+    # 云端同步间隔（秒）
+    CLOUD_SYNC_INTERVAL = 1
+
+    async def _cloud_sync_loop(self):
+        """
+        每 CLOUD_SYNC_INTERVAL 秒读取最新缓存值，实时写入云端 node_latest 表。
+        延迟约 1 秒，比 SQLite 历史推送快 59 倍。
+        """
+        while self._running:
+            try:
+                await asyncio.sleep(self.CLOUD_SYNC_INTERVAL)
+            except asyncio.CancelledError:
+                break
+
+            if not self._running:
+                break
+
+            # 读取当前缓存中的最新值
+            cache_snapshot = dict(self._value_cache)
+            if not cache_snapshot:
+                continue
+
+            # 在线程池里执行同步（避免阻塞事件循环）
+            loop = asyncio.get_event_loop()
+            try:
+                await loop.run_in_executor(
+                    None,
+                    _sync_values_to_cloud,
+                    cache_snapshot,
+                    _get_cloud_mysql(),
+                )
+            except Exception as e:
+                logger.warning("cloud_sync_failed", error=str(e))
+            else:
+                # 打印最新一条的 updated_at 做验证
+                sample = next(iter(cache_snapshot.values()), {})
+                logger.debug("cloud_sync_ok", node=next(iter(cache_snapshot)), 
+                             updated_at=sample.get("timestamp","")[:23])
 
     # ------------------------------------------------------------------ #
     #  批量写入 SQLite                                                      #

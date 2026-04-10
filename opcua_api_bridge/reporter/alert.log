@@ -22,3 +22,4 @@
 2026-04-02 17:03:53,285 [WARNING] 文件被占用，跳过本次: [Errno 13] Permission denied: 'C:\\Users\\Administrator\\WorkBuddy\\20260326125244\\opcua_api_bridge\\reporter\\output\\opcua_report.xlsx'
 2026-04-02 17:03:53,285 [WARNING] ⚠️ 连续失败 3 次！可能原因: SQLite 不可用 / Excel 被锁定 / 磁盘满
 2026-04-02 17:04:53,348 [WARNING] 文件被占用，跳过本次: [Errno 13] Permission denied: 'C:\\Users\\Administrator\\WorkBuddy\\20260326125244\\opcua_api_bridge\\reporter\\output\\opcua_report.xlsx'
+2026-04-07 18:06:50,851 [WARNING] 预热订阅失败（桥接器不可用，将直读 SQLite）: [WinError 10061] 由于目标计算机积极拒绝，无法连接。
