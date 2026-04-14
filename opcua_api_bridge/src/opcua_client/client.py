@@ -127,11 +127,18 @@ def _sync_values_to_cloud(cache_snapshot: dict, cloud_cfg: dict):
 # 缓存数据过期时间（秒），超过此时间缓存数据视为过期
 CACHE_STALE_TIMEOUT = 120
 
-# Session 被占用后的重试间隔（秒）
-YIELD_RECHECK_INTERVAL = 30
-
 # 推送超时：N 秒内未收到任何 datachange_notification → 视为连接异常
 PUSH_TIMEOUT = 300
+
+# 普通连接失败后退避时间（秒）
+CONNECT_FAIL_BACKOFF = 1800
+
+# 连接成功后等待首次推送的宽限期（秒）
+INITIAL_GRACE = 15
+
+# 推送超时/首次推送失败后断开重连的等待时间（秒）
+# 设为 500s：给 OPC 服务器足够时间释放旧 Session，避免重连后又触发 Session 满
+PUSH_FAIL_BACKOFF = 500
 
 # 心跳间隔：每 N 秒将缓存值强制写入 SQLite（保证时间序列连续）
 HEARTBEAT_INTERVAL = 10
@@ -166,14 +173,6 @@ OPC_COLLECT_COUNT = Counter(
     'opc_collect_total',
     'OPC UA 采集循环次数',
     ['status']
-)
-OPC_YIELD_COUNT = Counter(
-    'opc_yield_total',
-    'OPC UA Session 让出次数'
-)
-OPC_RESUME_COUNT = Counter(
-    'opc_resume_total',
-    'OPC UA 采集恢复次数'
 )
 OPC_PUSH_TIMEOUT_COUNT = Counter(
     'opc_push_timeout_total',
@@ -272,10 +271,11 @@ class OPCUAClient:
         # 推送超时检测：最后一次收到 datachange_notification 的时间
         self._last_push_time: float = 0  # 0 = 从未收到过推送
 
-        # 让出 / 恢复状态
-        self._yielded = False  # 是否因 Session 被占用而让出
-        self._consecutive_failures = 0
-        self._max_failures_before_yield = 3  # 连续失败 N 次后让出
+        # 连接时间（用于首次推送宽限期检测）
+        self._connected_at: float = 0
+
+        # 退避解禁时间：time.time() > _retry_after 才允许重连（0=立即可连）
+        self._retry_after: float = 0
 
         # 推送数据 buffer（批量写入 SQLite）
         self._write_buffer: List[Dict[str, Any]] = []
@@ -315,8 +315,7 @@ class OPCUAClient:
         self._collect_task = asyncio.create_task(self._collect_loop())
         logger.info("adaptive_collect_started", mode="default_subscribe",
                     push_timeout=PUSH_TIMEOUT,
-                    heartbeat_interval=HEARTBEAT_INTERVAL,
-                    yield_recheck=YIELD_RECHECK_INTERVAL)
+                    heartbeat_interval=HEARTBEAT_INTERVAL)
         return True
 
     async def stop(self):
@@ -428,14 +427,24 @@ class OPCUAClient:
 
         except Exception as e:
             err_str = str(e).lower()
-            is_session_limit = "session" in err_str and ("too many" in err_str or "max" in err_str)
+            is_session_full = "session" in err_str and "max" in err_str
 
-            if is_session_limit:
-                logger.warning("session_occupied",
-                             error=str(e),
-                             message="客户端正在使用 Session，自动让出")
+            if is_session_full:
+                # Session已满：服务器上已创建幽灵Session，无法自动恢复。
+                # 以退出码 2 终止进程（NSSM 配置该退出码为 ExitAction=None 不重启），
+                # 等待人工排查后手动重启服务。
+                logger.error("session_full_fatal",
+                           error=str(e),
+                           message="OPC UA Session已满，无法连接，以退出码2终止进程，禁止自动重启")
+                import os
+                os._exit(2)
             else:
-                logger.error("opc_connect_failed", error=str(e))
+                # 普通连接失败：等待 CONNECT_FAIL_BACKOFF 秒后重试
+                self._retry_after = time.time() + CONNECT_FAIL_BACKOFF
+                logger.error("opc_connect_failed",
+                           error=str(e),
+                           retry_after=CONNECT_FAIL_BACKOFF,
+                           message=f"连接失败，{CONNECT_FAIL_BACKOFF}秒后重试")
 
             self._client = None
             self._subscription = None
@@ -466,102 +475,60 @@ class OPCUAClient:
 
     async def _collect_loop(self):
         """
-        自适应采集循环：
-        - 默认：保持长连接 + 订阅，数据持续推送
-        - 推送超时：N 秒内没收到任何推送 → 视为连接异常 → 断开重连
-        - 让出：检测到 Session 被占用，断开并定期重试
-        - 恢复：重试成功后恢复长连接采集
+        自适应采集循环（极简退避版）：
+        - _retry_after 统一控制重连时机，无多余状态变量
+        - 普通连接失败：等 CONNECT_FAIL_BACKOFF 秒后重试
+        - Session满：直接终止进程，等人工重启
+        - 推送超时/首次推送宽限期到：断开后等 PUSH_FAIL_BACKOFF 秒重连
         """
-        # 初始连接成功后的宽限期：给 OPC 服务器几秒时间推送第一批数据
-        initial_grace = 15  # 首次连接后等 15 秒才开始检测推送超时
-        connected_at = 0
-
         while self._running:
             try:
-                # ---- 已让出状态：定期尝试重连 ----
-                if self._yielded:
-                    await asyncio.sleep(YIELD_RECHECK_INTERVAL)
-                    if not self._running:
-                        break
-
-                    logger.info("yield_recheck",
-                               message="尝试重连，检查客户端是否已断开")
-                    success = await self._connect_opc()
-                    if success:
-                        self._yielded = False
-                        self._consecutive_failures = 0
-                        connected_at = time.time()
-                        OPC_RESUME_COUNT.inc()
-                        logger.info("collect_resumed",
-                                   message="Session 已空闲，恢复高速采集")
+                # ── 1. 退避等待 ────────────────────────────────────────
+                remaining = self._retry_after - time.time()
+                if remaining > 0:
+                    logger.info("backoff_waiting",
+                               remaining=int(remaining),
+                               message=f"退避中，{int(remaining)}秒后重试")
+                    await asyncio.sleep(min(remaining, 5))
                     continue
 
-                # ---- 正常状态：保持连接 ----
+                # ── 2. 未连接 → 尝试连接 ───────────────────────────────
                 if self._client is None:
-                    # 首次连接或连接丢失后重连
                     success = await self._connect_opc()
-                    if not success:
-                        self._consecutive_failures += 1
+                    if success:
+                        self._connected_at = time.time()
+                        self._last_push_time = 0
+                        logger.info("opc_connected",
+                                   registered_nodes=len(self._collect_nodes))
+                    # 失败时 _connect_opc 已设好 _retry_after 或终止进程
+                    continue
 
-                        if self._consecutive_failures >= self._max_failures_before_yield:
-                            self._yielded = True
-                            OPC_YIELD_COUNT.inc()
-                            logger.warning("session_yielded",
-                                         consecutive_failures=self._consecutive_failures,
-                                         message="连续失败，让出 Session，等待客户端释放")
-                        else:
-                            await asyncio.sleep(5)  # 短暂重试
-                        continue
-
-                    # 连接成功，重置计数器和宽限期
-                    self._consecutive_failures = 0
-                    connected_at = time.time()
-                    logger.info("opc_connected",
-                               registered_nodes=len(self._collect_nodes))
-
-                # ---- 已连接：检查推送是否正常 ----
+                # ── 3. 已连接 → 每2秒巡检推送状态 ────────────────────
                 await asyncio.sleep(2)
-
                 if not self._running:
                     break
 
-                # 检查 session 对象是否还在
-                if not (hasattr(self._client, 'session') and self._client.session):
-                    logger.warning("session_lost", message="Session 丢失，等待 60 秒后重连")
-                    self._client = None
-                    self._subscription = None
-                    OPC_CONNECTION_STATUS.set(0)
-                    await asyncio.sleep(60)  # 等待服务器释放旧 Session
-                    continue
-
-                # 检查推送超时（核心：基于真实推送数据，而不是 session 对象）
+                now = time.time()
                 if self._last_push_time > 0:
-                    # 已经收到过推送，检查是否超时
-                    push_age = time.time() - self._last_push_time
+                    # 已收到过推送，检查是否超时
+                    push_age = now - self._last_push_time
                     if push_age > PUSH_TIMEOUT:
-                        OPC_PUSH_TIMEOUT_COUNT.inc()
                         logger.warning("push_timeout",
-                                      push_age_seconds=int(push_age),
-                                      push_timeout=PUSH_TIMEOUT,
-                                      message=f"{PUSH_TIMEOUT} 秒内未收到推送，视为连接异常，断开重连")
-                        # 主动断开，触发重连
+                                      push_age=int(push_age),
+                                      message=f"{PUSH_TIMEOUT}秒无推送，断开重连")
+                        OPC_PUSH_TIMEOUT_COUNT.inc()
                         await self._disconnect_opc()
-                        self._client = None
-                        self._subscription = None
-                        self._last_push_time = 0  # 重置
-                        await asyncio.sleep(60)  # 等待服务器释放旧 Session
+                        self._retry_after = time.time() + PUSH_FAIL_BACKOFF
                         continue
                 else:
-                    # 还没收到过推送（刚连上），给一个宽限期
-                    if (time.time() - connected_at) > initial_grace:
+                    # 从未收到推送，检查宽限期
+                    if now - self._connected_at > INITIAL_GRACE:
                         logger.warning("push_never_received",
-                                      grace_seconds=initial_grace,
-                                      message=f"连接后 {initial_grace} 秒内未收到任何推送，断开重连")
+                                      grace=INITIAL_GRACE,
+                                      message=f"连接后{INITIAL_GRACE}秒未收到推送，断开重连")
                         OPC_PUSH_TIMEOUT_COUNT.inc()
                         await self._disconnect_opc()
-                        self._client = None
-                        self._subscription = None
-                        await asyncio.sleep(60)  # 等待服务器释放旧 Session
+                        self._retry_after = time.time() + PUSH_FAIL_BACKOFF
                         continue
 
                 # 一切正常
@@ -572,10 +539,8 @@ class OPCUAClient:
             except Exception as e:
                 logger.error("collect_loop_error", error=str(e))
                 OPC_COLLECT_COUNT.labels("error").inc()
-                self._client = None
-                self._subscription = None
-                OPC_CONNECTION_STATUS.set(0)
-                await asyncio.sleep(5)
+                await self._disconnect_opc()
+                self._retry_after = time.time() + CONNECT_FAIL_BACKOFF
 
     # ------------------------------------------------------------------ #
     #  心跳写入（保证时间序列连续）                                           #
@@ -755,19 +720,16 @@ class OPCUAClient:
 
     def is_connected(self) -> bool:
         """返回是否有活跃的 OPC UA 连接。"""
-        if self._yielded:
-            return False
         if self._client is None:
             return False
-        # 检查推送是否超时
         if self._last_push_time > 0:
             if (time.time() - self._last_push_time) > PUSH_TIMEOUT:
                 return False
         return True
 
     def is_yielded(self) -> bool:
-        """返回是否因 Session 被占用而让出。"""
-        return self._yielded
+        """兼容旧接口：退避期间视为 yielded。"""
+        return self._client is None and (self._retry_after - time.time()) > 0
 
     def get_cache_freshness(self) -> int:
         """返回上次数据更新距今的秒数。"""
@@ -777,16 +739,15 @@ class OPCUAClient:
 
     def get_collect_status(self) -> str:
         """返回采集状态描述。"""
-        if self._yielded:
-            return "yielded"
         if self._client is None:
+            remaining = self._retry_after - time.time()
+            if remaining > 0:
+                return f"backoff({int(remaining)}s)"
             return "reconnecting"
-        # 检查推送是否超时
         if self._last_push_time > 0:
             if (time.time() - self._last_push_time) > PUSH_TIMEOUT:
                 return "push_timeout"
-        elif self._last_push_time == 0:
-            # 已连接但还没收到过推送
+        elif (time.time() - self._connected_at) <= INITIAL_GRACE:
             return "waiting_first_push"
         return "active"
 
