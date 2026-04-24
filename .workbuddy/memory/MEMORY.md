@@ -1,6 +1,6 @@
 # 工作区完整记忆
 
-> 更新时间：2026-04-06 19:10
+> 更新时间：2026-04-24 16:57
 > 工作区：`c:\Users\Administrator\WorkBuddy\20260326125244\`
 > 记忆仓库：Claw（WorkBuddy），不维护在 GitHub 仓库
 
@@ -41,7 +41,7 @@
 |------|-----|
 | OS | Windows 10 22H2 (Build 19045)，用户 Administrator |
 | GitHub | 用户名 `z1139554189`，仓库 `OPC-UA-Bridge` |
-| Python | 3.14.3（系统，推荐）、3.13.12（managed） |
+| Python | 3.13.3（系统，推荐）、3.13.12（managed）、3.14.3（managed） |
 | Node.js | 20.19.0 |
 | Chrome | `C:\Program Files\Google\Chrome\Application\chrome.exe` |
 | playwriter CLI | v0.0.102，通过 Chrome 扩展连接已有浏览器 |
@@ -70,7 +70,7 @@
 | 本机 IP | `192.168.10.10`（以太网） |
 | Read 支持 | ❌ 必须用 Subscription 订阅模式 |
 | 历史数据 | ❌ 不支持，桥接器自建 SQLite |
-| Session 限制 | 最大 **1 个**，桥接器和客户端互抢 → 自适应让出 |
+| Session 限制 | 最大 **1 个**，Session 满时 os._exit(2) 终止进程（NSSM 不自动重启） |
 | 首次订阅延迟 | 5-10 秒 |
 | 安全策略 | 无安全连接（去掉默认 Basic256Sha256） |
 | 节点结构 | ns=1，约 3500+ 根节点，每个 30+ 子属性 |
@@ -82,14 +82,14 @@
 |------|------|------|
 | 架构文档 | `architecture.md` | 完整架构设计 |
 | API 主应用 | `src/api/main.py` | v3.0.0，FastAPI，自适应采集模式 |
-| OPC UA 客户端 | `src/opcua_client/client.py` | v7.0.0，自适应采集 + 推送超时检测 + 心跳写入：默认长连接高速订阅，Session 被占用自动让出，30 秒重试恢复，**300 秒无推送视为断连**，每 10 秒心跳写入 SQLite |
+| OPC UA 客户端 | `src/opcua_client/client.py` | v7.0.0，极简退避版：统一 _retry_after 控制重连，Session 满 os._exit(2) 终止进程，**300 秒无推送视为断连**，PUSH_FAIL_BACKOFF=500s，每 10 秒心跳写入 SQLite |
 | 配置管理 | `src/config/settings.py` | pydantic-settings |
-| 健康检查 | `src/monitoring/health.py` | v3.0.0，检查采集状态（active/yielded/reconnecting/push_timeout/waiting_first_push）+ 缓存新鲜度 + 推送年龄 + 内存 |
+| 健康检查 | `src/monitoring/health.py` | v3.0.0，检查采集状态（active/backoff/reconnecting/push_timeout/waiting_first_push）+ 缓存新鲜度 + 推送年龄 + 内存 |
 | Prometheus 指标 | `src/monitoring/metrics.py` | 指标注册 |
 | 历史存储 | `src/storage/__init__.py` | HistoryDB 异步 SQLite（WAL、buffer 批量写入、7 天清理、分表） |
 | 调度器 | `reporter/scheduler.py` | 直读 SQLite + warmup 预热 + 文件锁检测 + 容错重试 3 次 |
-| Excel 报表 | `reporter/excel_report.py` | 追加式报表，首次新建全部 Sheet，后续只追加新行 |
-| 报表配置 | `reporter/config.py` | 5 个 R3xx PV 节点，间隔 1 分钟 |
+| Excel 报表 | `reporter/excel_report.py` | 追加式报表，首次新建全部 Sheet，后续只追加新行，**追加时自动检测列头匹配，不匹配则补列头** |
+| 报表配置 | `reporter/config.py` | 20 个 R3xx 节点（10 FIT PV + 10 FIQ OUT），间隔 1 分钟；另有 10 个 FIT ERR 仅订阅不入报表 |
 | 历史报表 | `reporter/history_report.py` | 一次性历史报表（过去 1 小时） |
 | Docker | `Dockerfile` + `docker-compose.yml` | 容器化部署 |
 | 测试 | `tests/` | test_health、test_opcua_client、test_api |
@@ -105,7 +105,7 @@
 
 ### 调度器行为
 
-- 每 60 秒从 SQLite 读取 **10 个节点**最新值，追加到 `reporter/output/opcua_report.xlsx`
+- 每 60 秒从 SQLite 读取 **20 个节点**最新值，追加到 `reporter/output/opcua_report.xlsx`
 - 启动时 `warmup_subscriptions()` 调桥接器 API 预热订阅
 - Excel 被占用时静默跳过；其他失败重试 3 次 + alert.log 告警
 
@@ -148,12 +148,33 @@
 | 桥接器和客户端抢 Session | 服务器只允许 1 个 Session | 自适应采集：默认长连接高速采集，检测到 BadTooManySessions 自动让出，30 秒重试恢复 |
 | 死值和断连无法区分 | v6 只检查 session 对象是否在内存里 | v7 推送超时检测：300 秒无推送 = 断连 + 心跳写入 10 秒保证时间序列连续（source=heartbeat） |
 | 推送超时 30s 误判断连 | 只订阅 5 个同类型 FIT PV，工艺稳定时值全不变 | PUSH_TIMEOUT 30s→300s + 新增 5 个节点分散相关性 |
+| 报表多出无名列头列 | config 曾临时加 ERR 节点，删除后旧数据列残留（openpyxl max_column 不收缩） | 用 delete_cols 从右往左删除残留列，或重建报表 |
 
 **工作流程教训**：遇错先查 Issues、大操作先评估影响、交付前验证核心功能、MQTT 是工业数据上传主流方案
 
 ---
 
-## 第六部分：已安装 Skills
+## 第六部分：工作流程规则（2026-04-10 新增）
+
+### 文件清理流程
+1. **全面扫描**：扫描整个目录树，不遗漏任何角落（包括 .workbuddy/、隐藏目录）
+2. **分析分类**：区分核心文件 vs 无用文件，不凭感觉
+3. **列表确认**：列出所有待删除项 + 删除原因 + 保留项 + 保留原因，请用户逐项确认后再执行
+4. **执行删除**：删除确认的无用文件
+5. **生成记忆**：清理完成后，将结果记录到 MEMORY.md
+
+### Git 推送流程
+1. **推送前必查**：执行 `git status` 和 `git ls-files`，确保所有本地有价值的文件都已在 git 中，无遗漏
+2. **特别关注**：类似 server.js 这种从未进过 git 的文件
+3. **添加变更**：`git add -A`
+4. **提交**：`git commit -m "..."`
+5. **推送**：`git push origin main`
+
+**核心原则**：筛选无用文件 → 用户确认删除 → 一个不落推送 git
+
+---
+
+## 第七部分：已安装 Skills
 
 find-skills、python-backend、fastapi、docker-compose
 

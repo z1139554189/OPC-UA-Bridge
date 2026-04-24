@@ -89,6 +89,18 @@ def generate_excel(
         ws = wb.active
         next_row = ws.max_row + 1
 
+        # ── 检测列头是否匹配当前节点列表，不匹配则补列头 ──
+        existing_headers = [ws.cell(row=1, column=c).value for c in range(1, ws.max_column + 1)]
+        expected_headers = ["时间"] + short_names
+        if existing_headers != expected_headers:
+            # 补齐缺失的列头（追加新列）
+            for col_i, header in enumerate(expected_headers, start=1):
+                if col_i > len(existing_headers) or existing_headers[col_i - 1] != header:
+                    cell = ws.cell(row=1, column=col_i, value=header)
+                    _header_style(cell)
+                    ws.column_dimensions[get_column_letter(col_i)].width = 20
+            logger.info(f"列头已更新: {len(existing_headers)} → {len(expected_headers)} 列")
+
         # A 列：时间
         ws.cell(row=next_row, column=1, value=timestamp)
         ws.cell(row=next_row, column=1).border = THIN_BORDER

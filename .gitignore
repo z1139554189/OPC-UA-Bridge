@@ -33,3 +33,6 @@ reporter/*.xlsx
 .workbuddy/*
 !.workbuddy/memory/
 .workbuddy/memory/MEMORY.md
+
+# ===== 临时截图 =====
+*.png
