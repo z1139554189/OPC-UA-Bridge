@@ -1,6 +1,6 @@
 # 工作区完整记忆
 
-> 更新时间：2026-04-24 16:57
+> 更新时间：2026-04-28 14:40
 > 工作区：`c:\Users\Administrator\WorkBuddy\20260326125244\`
 > 记忆仓库：Claw（WorkBuddy），不维护在 GitHub 仓库
 
@@ -96,12 +96,22 @@
 
 ### Windows 服务
 
-| 服务名 | 命令 | 端口 |
-|--------|------|------|
-| OPCUABridge | `C:\Python314\python.exe -m uvicorn src.api.main:app --host 0.0.0.0 --port 8000` | 8000 |
-| OPCUAScheduler | `C:\Python314\python.exe reporter/scheduler.py` | — |
+| 服务名 | 命令 | 端口 | 启动类型 |
+|--------|------|------|----------|
+| OPCUABridge | `C:\Python314\python.exe -m uvicorn src.api.main:app --host 0.0.0.0 --port 8000` | 8000 | AUTO_START（2026-04-28 改） |
+| OPCUAScheduler | `C:\Python314\python.exe reporter/scheduler.py` | — | AUTO_START |
 
 管理命令：`net stop/start OPCUABridge`、`net stop/start OPCUAScheduler`
+
+### NSSM Recovery 策略
+
+| 退出码 | 含义 | OPCUABridge | OPCUAScheduler |
+|--------|------|-------------|----------------|
+| 0 | 正常退出 | Exit（不重启） | Restart |
+| 1 | 一般错误 | Restart | Restart |
+| 2 | Session 满 os._exit(2) | Exit（故意不重启，避免死循环） | — |
+
+重启延迟：~5 秒
 
 ### 调度器行为
 
