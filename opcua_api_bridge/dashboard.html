@@ -1,0 +1,348 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>OPC UA Dashboard</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.8/dist/chart.umd.min.js"></script>
+<style>
+:root { --bg: #0d1117; --card: #161b22; --border: #30363d; --text: #c9d1d9; --text2: #8b949e; --accent: #58a6ff; --green: #3fb950; --red: #f85149; --orange: #d29922; }
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; }
+.header { background: var(--card); border-bottom: 1px solid var(--border); padding: 12px 24px; display: flex; align-items: center; justify-content: space-between; }
+.header h1 { font-size: 18px; color: var(--accent); }
+.header .status { font-size: 12px; padding: 4px 10px; border-radius: 12px; }
+.header .status.online { background: #1a3a1a; color: var(--green); }
+.header .status.offline { background: #3a1a1a; color: var(--red); }
+.main { padding: 16px 24px; display: flex; flex-direction: column; gap: 16px; }
+.cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 10px; }
+.card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; }
+.card .label { font-size: 11px; color: var(--text2); margin-bottom: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.card .value { font-size: 24px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.card .unit { font-size: 12px; color: var(--text2); margin-left: 4px; }
+.card .meta { font-size: 10px; color: var(--text2); margin-top: 4px; }
+.card.err { border-color: var(--red); }
+.card.err .value { color: var(--red); }
+.panel { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 16px; }
+.panel h2 { font-size: 14px; color: var(--accent); margin-bottom: 12px; }
+.controls { display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-end; margin-bottom: 12px; }
+.control-group { display: flex; flex-direction: column; gap: 4px; }
+.control-group label { font-size: 11px; color: var(--text2); }
+.control-group input, .control-group select { background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px; font-size: 13px; outline: none; }
+.control-group input:focus, .control-group select:focus { border-color: var(--accent); }
+.node-checkboxes { display: flex; flex-wrap: wrap; gap: 6px; max-height: 200px; overflow-y: auto; padding: 4px; }
+.node-checkboxes label { display: flex; align-items: center; gap: 4px; font-size: 12px; cursor: pointer; padding: 3px 8px; border-radius: 4px; border: 1px solid transparent; }
+.node-checkboxes label:hover { border-color: var(--border); }
+.node-checkboxes label.checked { border-color: var(--accent); background: rgba(88,166,255,0.08); }
+.node-checkboxes input[type=checkbox] { accent-color: var(--accent); }
+.btn { background: var(--accent); color: #fff; border: none; border-radius: 6px; padding: 7px 16px; font-size: 13px; cursor: pointer; font-weight: 600; }
+.btn:hover { opacity: 0.85; }
+.btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.btn-outline { background: transparent; border: 1px solid var(--border); color: var(--text); }
+.chart-container { width: 100%; height: 400px; position: relative; }
+.loading { text-align: center; padding: 40px; color: var(--text2); }
+.toast { position: fixed; bottom: 24px; right: 24px; background: var(--accent); color: #fff; padding: 10px 20px; border-radius: 8px; font-size: 13px; z-index: 999; animation: fadein .3s; }
+@keyframes fadein { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>OPC UA Bridge Dashboard</h1>
+  <span class="status" id="connStatus">连接中...</span>
+</div>
+
+<div class="main">
+  <!-- 实时数据卡片区 -->
+  <div class="panel">
+    <h2>📊 实时数据</h2>
+    <div class="cards" id="realtimeCards"></div>
+  </div>
+
+  <!-- 历史查询区 -->
+  <div class="panel">
+    <h2>📈 历史数据查询</h2>
+    <div class="controls">
+      <div class="control-group">
+        <label>开始时间</label>
+        <input type="datetime-local" id="startTime">
+      </div>
+      <div class="control-group">
+        <label>结束时间</label>
+        <input type="datetime-local" id="endTime">
+      </div>
+      <div class="control-group">
+        <label>采样间隔</label>
+        <select id="interval">
+          <option value="10">10秒</option>
+          <option value="30">30秒</option>
+          <option value="60" selected>1分钟</option>
+          <option value="300">5分钟</option>
+          <option value="600">10分钟</option>
+          <option value="1800">30分钟</option>
+          <option value="3600">1小时</option>
+        </select>
+      </div>
+    </div>
+    <div class="node-checkboxes" id="nodeCheckboxes"></div>
+    <div style="margin-top:10px; display:flex; gap:8px;">
+      <button class="btn" id="btnQuery" onclick="queryHistory()">🔍 查询</button>
+      <button class="btn btn-outline" id="btnExport" onclick="exportExcel()" disabled>📥 导出 Excel</button>
+    </div>
+  </div>
+
+  <!-- 图表区 -->
+  <div class="panel">
+    <h2>📉 趋势图</h2>
+    <div class="chart-container" id="chartWrapper">
+      <canvas id="historyChart"></canvas>
+    </div>
+    <div id="chartEmpty" class="loading" style="display:none">请选择节点并点击"查询"</div>
+  </div>
+</div>
+
+<script>
+const BASE = 'http://localhost:8000';
+
+// 所有已知节点
+const ALL_NODES_FIT = ['FIT_05R301F01.PV','FIT_05R302F01.PV','FIT_05R303F01.PV','FIT_05R304F01.PV','FIT_05R305F01.PV','FIT_05R306F01.PV','FIT_05R307F01.PV','FIT_05R308F01.PV','FIT_05R309F01.PV','FIT_05R310F01.PV'];
+const ALL_NODES_FIQ = ['FIQ_05R301F01.OUT','FIQ_05R302F01.OUT','FIQ_05R303F01.OUT','FIQ_05R304F01.OUT','FIQ_05R305F01.OUT','FIQ_05R306F01.OUT','FIQ_05R307F01.OUT','FIQ_05R308F01.OUT','FIQ_05R309F01.OUT','FIQ_05R310F01.OUT'];
+const ALL_NODES = [...ALL_NODES_FIT, ...ALL_NODES_FIQ];
+
+let chart = null;
+let lastQueryData = null;
+
+// 初始化时间
+const now = new Date();
+document.getElementById('endTime').value = toLocalISO(now);
+document.getElementById('startTime').value = toLocalISO(new Date(now - 3600000));
+
+function toLocalISO(d) {
+  const off = d.getTimezoneOffset();
+  const local = new Date(d.getTime() - off * 60000);
+  return local.toISOString().slice(0, 16);
+}
+
+// 渲染复选框
+function renderCheckboxes() {
+  const container = document.getElementById('nodeCheckboxes');
+  let html = '';
+  for (const n of ALL_NODES) {
+    const cat = n.startsWith('FIT') ? 'FIT' : 'FIQ';
+    const color = cat === 'FIT' ? '#3fb950' : '#d29922';
+    html += `<label id="lbl_${n}"><input type="checkbox" value="${n}" onchange="toggleCheck(this)" style="accent-color:${color}"><span style="color:${color}">${n}</span></label>`;
+  }
+  container.innerHTML = html;
+}
+
+function toggleCheck(cb) {
+  const lbl = document.getElementById('lbl_' + cb.value);
+  if (cb.checked) lbl.classList.add('checked');
+  else lbl.classList.remove('checked');
+}
+
+// 获取选中节点（返回完整 node_id）
+function getSelectedNodes() {
+  const cbs = document.querySelectorAll('#nodeCheckboxes input:checked');
+  return Array.from(cbs).map(c => 'ns=1;s=' + c.value);
+}
+
+// 实时数据轮询
+async function pollRealtime() {
+  try {
+    const [healthResp, cacheResp] = await Promise.all([
+      fetch(BASE + '/health'),
+      fetch(BASE + '/api/v1/cache/stats')
+    ]);
+    const health = await healthResp.json();
+    const cache = await cacheResp.json();
+    
+    const s = document.getElementById('connStatus');
+    if (health.opcua_connected) {
+      s.textContent = '● 已连接';
+      s.className = 'status online';
+    } else {
+      s.textContent = '● 未连接';
+      s.className = 'status offline';
+    }
+
+    // 获取实时值
+    const batchBody = JSON.stringify(ALL_NODES.map(n => 'ns=1;s=' + n));
+    const valsResp = await fetch(BASE + '/api/v1/nodes/batch-read', {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: batchBody
+    });
+    const valsData = await valsResp.json();
+    
+    renderCards(valsData.results || []);
+  } catch (e) {
+    document.getElementById('connStatus').textContent = '● 断开';
+    document.getElementById('connStatus').className = 'status offline';
+  }
+}
+
+function renderCards(results) {
+  const container = document.getElementById('realtimeCards');
+  const map = {};
+  for (const r of results) map[r.node_id] = r;
+  
+  let html = '';
+  for (const n of ALL_NODES) {
+    const fullId = 'ns=1;s=' + n;
+    const r = map[fullId];
+    const val = r && r.value !== null ? Number(r.value).toFixed(2) : '--';
+    const qual = r ? (r.quality || '--') : '--';
+    const isErr = qual !== 'Good' && qual !== '--';
+    const cat = n.startsWith('FIT') ? 'FIT' : 'FIQ';
+    const unit = cat === 'FIT' ? 'kg/h' : '';
+    html += `<div class="card${isErr ? ' err' : ''}">
+      <div class="label">${n}</div>
+      <div class="value">${val}<span class="unit">${unit}</span></div>
+      <div class="meta">${qual} · ${cat}</div>
+    </div>`;
+  }
+  container.innerHTML = html;
+}
+
+// 历史查询
+async function queryHistory() {
+  const nodes = getSelectedNodes();
+  if (nodes.length === 0) { toast('请至少选择一个节点'); return; }
+
+  const btn = document.getElementById('btnQuery');
+  btn.disabled = true;
+  btn.textContent = '查询中...';
+
+  const body = {
+    node_ids: nodes,
+    start_time: document.getElementById('startTime').value + ':00',
+    end_time: document.getElementById('endTime').value + ':00',
+    interval_seconds: parseInt(document.getElementById('interval').value)
+  };
+
+  try {
+    const resp = await fetch(BASE + '/api/v1/history/query', {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)
+    });
+    const data = await resp.json();
+    lastQueryData = data;
+    drawChart(data);
+    document.getElementById('btnExport').disabled = false;
+    document.getElementById('chartEmpty').style.display = 'none';
+    toast(`查询完成，共 ${data.total_points} 个数据点`);
+  } catch (e) {
+    toast('查询失败: ' + e.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '🔍 查询';
+  }
+}
+
+function drawChart(data) {
+  // 销毁旧图表并重建 canvas（Chart.js destroy() 不能彻底清空上下文）
+  if (chart) { chart.destroy(); chart = null; }
+  const wrapper = document.getElementById('chartWrapper');
+  const oldCanvas = document.getElementById('historyChart');
+  if (oldCanvas) oldCanvas.remove();
+  const newCanvas = document.createElement('canvas');
+  newCanvas.id = 'historyChart';
+  wrapper.appendChild(newCanvas);
+
+  const ctx = newCanvas.getContext('2d');
+
+  const colors = ['#58a6ff','#3fb950','#d29922','#f85149','#bc8cff','#79c0ff','#f0883e','#a5d6ff','#ff7b72','#d2a8ff',
+                  '#56d364','#e3b341','#f0883e','#db6d28','#7ee787','#f78166','#a371f7','#58a6ff','#3fb950','#d29922'];
+  
+  const datasets = data.series.map((s, i) => ({
+    label: s.display_name,
+    data: s.points.map(p => ({ x: new Date(p.timestamp).getTime(), y: p.value })),
+    borderColor: colors[i % colors.length],
+    backgroundColor: colors[i % colors.length] + '20',
+    borderWidth: 1.5,
+    pointRadius: 0,
+    tension: 0.1,
+  }));
+
+  chart = new Chart(ctx, {
+    type: 'line',
+    data: { datasets },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { labels: { color: '#8b949e', usePointStyle: true, boxWidth: 8, padding: 12 } },
+        tooltip: {
+          callbacks: {
+            title: items => items.length ? new Date(items[0].parsed.x).toLocaleString('zh-CN') : '',
+            label: ctx => ctx.dataset.label + ': ' + Number(ctx.parsed.y).toFixed(2)
+          }
+        }
+      },
+      scales: {
+        x: {
+          type: 'linear',
+          ticks: {
+            color: '#8b949e',
+            maxTicksLimit: 15,
+            callback: function(v) {
+              const d = new Date(v);
+              const pad = n => String(n).padStart(2, '0');
+              return pad(d.getMonth()+1)+'-'+pad(d.getDate())+' '+pad(d.getHours())+':'+pad(d.getMinutes());
+            }
+          },
+          grid: { color: '#21262d' }
+        },
+        y: {
+          ticks: { color: '#8b949e', callback: v => Number(v).toFixed(2) },
+          grid: { color: '#21262d' }
+        }
+      }
+    }
+  });
+}
+
+// 导出 Excel
+async function exportExcel() {
+  if (!lastQueryData) return;
+  const nodes = getSelectedNodes();
+  if (nodes.length === 0) return;
+
+  const body = {
+    node_ids: nodes,
+    start_time: document.getElementById('startTime').value + ':00',
+    end_time: document.getElementById('endTime').value + ':00',
+    interval_seconds: parseInt(document.getElementById('interval').value)
+  };
+
+  try {
+    const resp = await fetch(BASE + '/api/v1/history/export', {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)
+    });
+    const blob = await resp.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = resp.headers.get('Content-Disposition')?.match(/filename="(.+)"/)?.[1] || 'report.xlsx';
+    a.click();
+    URL.revokeObjectURL(url);
+    toast('报表已下载');
+  } catch (e) {
+    toast('导出失败: ' + e.message);
+  }
+}
+
+function toast(msg) {
+  const el = document.createElement('div');
+  el.className = 'toast';
+  el.textContent = msg;
+  document.body.appendChild(el);
+  setTimeout(() => el.remove(), 2500);
+}
+
+// 初始化
+renderCheckboxes();
+pollRealtime();
+setInterval(pollRealtime, 3000);
+</script>
+</body>
+</html>

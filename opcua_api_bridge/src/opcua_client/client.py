@@ -562,7 +562,7 @@ class OPCUAClient:
                 break
 
             # 只在连接正常时才写心跳
-            if self._yielded or self._client is None:
+            if self.is_yielded() or self._client is None:
                 continue
 
             # 推送超时期间不写心跳（说明连接已经异常了）
