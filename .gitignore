@@ -18,7 +18,6 @@ data/
 # ===== 日志和输出 =====
 logs/
 reporter/logs/
-reporter/output/
 reporter/scheduler.log
 reporter/alert.log
 reporter/*.xlsx
