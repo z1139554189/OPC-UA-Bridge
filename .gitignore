@@ -29,10 +29,9 @@ reporter/*.xlsx
 *.swp
 *.swo
 
-# ===== WorkBuddy 本地配置 =====
+# ===== WorkBuddy 记忆（提交到 Git）=====
 .workbuddy/*
 !.workbuddy/memory/
-.workbuddy/memory/MEMORY.md
 
 # ===== 临时截图 =====
 *.png
