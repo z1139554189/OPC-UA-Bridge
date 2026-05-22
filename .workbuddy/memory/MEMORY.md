@@ -1,6 +1,6 @@
 # 工作区完整记忆
 
-> 更新时间：2026-05-21 16:35
+> 更新时间：2026-05-22 15:00
 > 工作区：`C:\Users\Administrator\WorkBuddy\2026-05-21-10-09-10\`
 > 记忆仓库：WorkBuddy workbuddy/memory/ + GitHub 仓库
 
@@ -46,10 +46,14 @@
 | Chrome | `C:\Program Files\Google\Chrome\Application\chrome.exe` |
 | NSSM | `D:\Tools\nssm.exe`（v2.24 64-bit），Windows 服务管理 |
 | 网络路由 | 永久路由 `172.30.0.0/24 → 192.168.10.1`（接口 192.168.10.10） |
+| Tailscale VPN | 设备 `chinami-2rjmba3`，IP `100.96.61.25`，账号 GitHub `z1139554189` |
+| Tailscale 设备2 | `v2405a`，IP `100.94.65.1` |
+| Dashboard 远程地址 | `http://100.96.61.25:8000/dashboard`（需 Tailscale 组网） |
+| 防火墙规则 | `OPCUABridge-8000`，TCP 8000 入站已开放 |
 
 ---
 
-## 第四部分：OPC-UA-Bridge 项目（当前状态 2026-05-21）
+## 第四部分：OPC-UA-Bridge 项目（当前状态 2026-05-22）
 
 ### 项目概况
 
@@ -101,6 +105,7 @@
 | 实时看板 | 3秒轮询 `/api/v1/cache/stats`，20 卡片（FIT 绿色 kg/h，FIQ 橙色） |
 | 历史查询 | `POST /api/v1/history/query`，时间桶采样，Chart.js 趋势图 |
 | Excel 导出 | `POST /api/v1/history/export`，固定时间桶对齐，每行一个间隔 |
+| 远程访问 | 2026-05-22 修复 `localhost` 硬编码 → `window.location.origin`，Tailscale 组网可远程访问 |
 
 ### SQLite 历史库
 
@@ -159,6 +164,12 @@
 | 5 | 日期适配器缺失 | Chart.js v4 时间轴需外部适配器 | **换方案优于补依赖**：`type: 'linear'` + 毫秒时间戳 + 手动格式化 tick |
 | 6 | Excel 时间不对齐 + 空白 | 精确字符串匹配时间戳，毫秒不同致匹配失败 | **时间桶对齐**：不同源数据按固定间隔分桶，不依赖精确时间戳 |
 | — | 旧 MEMORY.md 被覆盖 | 整合记忆时误用 Write 覆盖而非 Edit 追加 | **整合记忆用 Edit 追加**，不得覆盖已有内容 |
+
+### 2026-05-22 Tailscale 组网教训
+
+| # | 问题 | 根因 | 教训 |
+|---|------|------|------|
+| 7 | Dashboard 远程访问无数据 | JS 硬编码 `http://localhost:8000`，远程浏览器把 API 请求发到自己机器 | **前端 BASE URL 用 `window.location.origin`**，自动适配访问地址 |
 
 ---
 
