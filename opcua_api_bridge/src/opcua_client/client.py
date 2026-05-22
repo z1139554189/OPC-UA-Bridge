@@ -1,12 +1,12 @@
 """
 OPC UA 客户端核心模块（自适应采集模式 + 推送超时检测）
 Author: WorkBuddy SRE
-Version: 7.0.0
+Version: 7.1.0
 
 关键设计：
 - 默认保持长连接 + 订阅，数据持续推送（秒级），全部写入 SQLite
 - 检测到 Session 被占用（BadTooManySessions）时自动让出
-- 每 YIELD_RECHECK_INTERVAL 秒尝试重连，客户端断开后自动恢复
+- TCP 端口预检：区分网络未就绪（30s 短退避）和真正连接失败（1800s 长退避）
 - 推送超时检测：N 秒内未收到任何推送 → 视为连接异常 → 断开重连
 - 心跳写入：定期将缓存值写入 SQLite（source=heartbeat），保证时间序列连续
 - API 层只从内存缓存读取，无阻塞
@@ -139,6 +139,13 @@ INITIAL_GRACE = 15
 # 推送超时/首次推送失败后断开重连的等待时间（秒）
 # 设为 500s：给 OPC 服务器足够时间释放旧 Session，避免重连后又触发 Session 满
 PUSH_FAIL_BACKOFF = 500
+
+# 网络未就绪时的退避时间（秒），区别于正常连接失败的 1800s
+# 用于开机后网络栈未就绪 / 路由未建立 / 网线未插等场景
+NETWORK_UNREACHABLE_BACKOFF = 30
+
+# TCP 预检超时（秒）
+NETWORK_CHECK_TIMEOUT = 5
 
 # 心跳间隔：每 N 秒将缓存值强制写入 SQLite（保证时间序列连续）
 HEARTBEAT_INTERVAL = 10
@@ -397,8 +404,43 @@ class OPCUAClient:
     #  OPC UA 连接 / 断开                                                    #
     # ------------------------------------------------------------------ #
 
+    async def _check_network_reachable(self) -> bool:
+        """
+        TCP 级别检查 OPC UA 端点是否可达（异步，5s 超时）。
+        用于区分"网络未就绪"（短退避 30s）和"真正的连接失败"（长退避 1800s）。
+        开机后 Windows 网络栈和静态路由可能需要几十秒才能就绪，
+        此预检确保不会因为 WinError 1232 等临时网络错误进入 30 分钟长退避。
+        """
+        import re
+        try:
+            m = re.match(r'opc\.tcp://([^:]+):(\d+)', self.endpoint)
+            if not m:
+                return True  # 无法解析 URL，假定可达
+            host, port = m.group(1), int(m.group(2))
+            _, writer = await asyncio.wait_for(
+                asyncio.open_connection(host, port),
+                timeout=NETWORK_CHECK_TIMEOUT,
+            )
+            writer.close()
+            await writer.wait_closed()
+            return True
+        except Exception:
+            return False
+
     async def _connect_opc(self) -> bool:
         """建立 OPC UA 连接并创建订阅。"""
+        # ── 网络可达性预检（避免 WinError 1232 触发 1800s 长退避）──
+        if not await self._check_network_reachable():
+            self._retry_after = time.time() + NETWORK_UNREACHABLE_BACKOFF
+            logger.warning("opc_network_unreachable",
+                           endpoint=self.endpoint,
+                           retry_after=NETWORK_UNREACHABLE_BACKOFF,
+                           message=f"OPC UA 服务器网络不可达，{NETWORK_UNREACHABLE_BACKOFF}秒后重试")
+            self._client = None
+            self._subscription = None
+            OPC_CONNECTION_STATUS.set(0)
+            return False
+
         try:
             client = AsyncClient(self.endpoint)
             if self.username:
@@ -439,12 +481,24 @@ class OPCUAClient:
                 import os
                 os._exit(2)
             else:
-                # 普通连接失败：等待 CONNECT_FAIL_BACKOFF 秒后重试
-                self._retry_after = time.time() + CONNECT_FAIL_BACKOFF
-                logger.error("opc_connect_failed",
-                           error=str(e),
-                           retry_after=CONNECT_FAIL_BACKOFF,
-                           message=f"连接失败，{CONNECT_FAIL_BACKOFF}秒后重试")
+                # 防御层：即使 TCP 预检通过，实际连接仍可能因网络瞬断失败
+                err_str = str(e).lower()
+                is_network_error = any(kw in err_str for kw in [
+                    "winerror 1232", "network location", "cannot reach",
+                    "no route to host", "network is unreachable",
+                ])
+                if is_network_error:
+                    self._retry_after = time.time() + NETWORK_UNREACHABLE_BACKOFF
+                    logger.warning("opc_connect_network_error",
+                                   error=str(e)[:100],
+                                   retry_after=NETWORK_UNREACHABLE_BACKOFF,
+                                   message=f"连接时网络错误，{NETWORK_UNREACHABLE_BACKOFF}秒后重试")
+                else:
+                    self._retry_after = time.time() + CONNECT_FAIL_BACKOFF
+                    logger.error("opc_connect_failed",
+                               error=str(e),
+                               retry_after=CONNECT_FAIL_BACKOFF,
+                               message=f"连接失败，{CONNECT_FAIL_BACKOFF}秒后重试")
 
             self._client = None
             self._subscription = None
