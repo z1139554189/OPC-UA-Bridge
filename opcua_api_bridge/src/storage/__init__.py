@@ -24,7 +24,7 @@ logger = structlog.get_logger()
 
 # 默认配置
 DEFAULT_DB_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "data", "history.db")
-DEFAULT_RETENTION_DAYS = 7
+DEFAULT_RETENTION_DAYS = 365
 DEFAULT_FLUSH_INTERVAL = 5  # 秒，buffer 满 N 秒后写入
 DEFAULT_FLUSH_SIZE = 100    # 条，buffer 满 N 条后写入
 
