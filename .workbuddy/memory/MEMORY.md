@@ -110,14 +110,14 @@
 ### SQLite 历史库
 
 - 路径：`opcua_api_bridge/data/history.db`
-- WAL 模式 + 7 天自动清理
+- WAL 模式 + 365 天自动清理（2026-05-25 由 7 天改为 365 天）
 
 ### 项目模块清单（v7 遗留 + v3 新增）
 
 | 模块 | 文件 | 说明 |
 |------|------|------|
 | API 主应用 | `src/api/main.py` | v3.0.0，FastAPI + Dashboard + 历史查询/导出 |
-| OPC UA 客户端 | `src/opcua_client/client.py` | v7.0.0，极简退避版：统一 _retry_after 控制重连，300 秒无推送视为断连 |
+| OPC UA 客户端 | `src/opcua_client/client.py` | v7.1.0，v7.0 极简退避版 + TCP 端口预检：网络未就绪 → 30s 短退避，协议失败 → 1800s 长退避 |
 | 配置管理 | `src/config/settings.py` | pydantic-settings |
 | 健康检查 | `src/monitoring/health.py` | v3.0.0，检查采集状态 + 缓存新鲜度 + 推送年龄 |
 | 历史存储 | `src/storage/__init__.py` | HistoryDB 异步 SQLite（WAL、buffer 批量写入、7 天清理、分表） |
@@ -170,6 +170,12 @@
 | # | 问题 | 根因 | 教训 |
 |---|------|------|------|
 | 7 | Dashboard 远程访问无数据 | JS 硬编码 `http://localhost:8000`，远程浏览器把 API 请求发到自己机器 | **前端 BASE URL 用 `window.location.origin`**，自动适配访问地址 |
+
+### 2026-05-22 开机自启失败教训
+
+| # | 问题 | 根因 | 教训 |
+|---|------|------|------|
+| 8 | 关机重启后桥接器 30 分钟无数据 | 开机时网络未就绪 → `WinError 1232` → 被当作普通连接失败进入 1800s 退避 | **区分网络错误和协议错误**：TCP 端口预检 → 网络不通用短退避（30s），协议失败用长退避（1800s） | ✅ 2026-05-22 15:30 用户实测验证通过 |
 
 ---
 
