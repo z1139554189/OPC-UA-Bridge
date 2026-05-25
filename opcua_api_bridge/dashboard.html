@@ -22,7 +22,6 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; b
 .card .unit { font-size: 12px; color: var(--text2); margin-left: 4px; }
 .card .meta { font-size: 10px; color: var(--text2); margin-top: 4px; }
 .card.err { border-color: var(--red); }
-.card.err .value { color: var(--red); }
 .panel { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 16px; }
 .panel h2 { font-size: 14px; color: var(--accent); margin-bottom: 12px; }
 .controls { display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-end; margin-bottom: 12px; }
@@ -107,7 +106,10 @@ const BASE = window.location.origin;
 // 所有已知节点
 const ALL_NODES_FIT = ['FIT_05R301F01.PV','FIT_05R302F01.PV','FIT_05R303F01.PV','FIT_05R304F01.PV','FIT_05R305F01.PV','FIT_05R306F01.PV','FIT_05R307F01.PV','FIT_05R308F01.PV','FIT_05R309F01.PV','FIT_05R310F01.PV'];
 const ALL_NODES_FIQ = ['FIQ_05R301F01.OUT','FIQ_05R302F01.OUT','FIQ_05R303F01.OUT','FIQ_05R304F01.OUT','FIQ_05R305F01.OUT','FIQ_05R306F01.OUT','FIQ_05R307F01.OUT','FIQ_05R308F01.OUT','FIQ_05R309F01.OUT','FIQ_05R310F01.OUT'];
+const ALL_NODES_ERR = ['FIT_05R301F01.ERR','FIT_05R302F01.ERR','FIT_05R303F01.ERR','FIT_05R304F01.ERR','FIT_05R305F01.ERR','FIT_05R306F01.ERR','FIT_05R307F01.ERR','FIT_05R308F01.ERR','FIT_05R309F01.ERR','FIT_05R310F01.ERR'];
 const ALL_NODES = [...ALL_NODES_FIT, ...ALL_NODES_FIQ];
+// 批量查询包含 ERR 节点（用于 FIT 卡片状态显示），但不单独渲染 ERR 卡片
+const ALL_BATCH_NODES = [...ALL_NODES, ...ALL_NODES_ERR];
 
 let chart = null;
 let lastQueryData = null;
@@ -131,6 +133,10 @@ function renderCheckboxes() {
     const cat = n.startsWith('FIT') ? 'FIT' : 'FIQ';
     const color = cat === 'FIT' ? '#3fb950' : '#d29922';
     html += `<label id="lbl_${n}"><input type="checkbox" value="${n}" onchange="toggleCheck(this)" style="accent-color:${color}"><span style="color:${color}">${n}</span></label>`;
+  }
+  // ERR 节点
+  for (const n of ALL_NODES_ERR) {
+    html += `<label id="lbl_${n}"><input type="checkbox" value="${n}" onchange="toggleCheck(this)" style="accent-color:#f85149"><span style="color:#f85149">${n}</span></label>`;
   }
   container.innerHTML = html;
 }
@@ -166,8 +172,8 @@ async function pollRealtime() {
       s.className = 'status offline';
     }
 
-    // 获取实时值
-    const batchBody = JSON.stringify(ALL_NODES.map(n => 'ns=1;s=' + n));
+    // 批量查询包含 ERR 节点（用于 FIT 卡片状态）
+    const batchBody = JSON.stringify(ALL_BATCH_NODES.map(n => 'ns=1;s=' + n));
     const valsResp = await fetch(BASE + '/api/v1/nodes/batch-read', {
       method: 'POST', headers: {'Content-Type': 'application/json'}, body: batchBody
     });
@@ -185,6 +191,19 @@ function renderCards(results) {
   const map = {};
   for (const r of results) map[r.node_id] = r;
   
+  // 建立 ERR 查询映射：FIT_05R3xxF01.ERR 的值
+  const errVals = {};
+  for (const en of ALL_NODES_ERR) {
+    const r = map['ns=1;s=' + en];
+    errVals[en] = r && r.value !== null ? Number(r.value) : null;
+  }
+  // 便捷函数：根据 FIT.PV 节点名找对应 ERR 节点值
+  function getErr(fitPvNode) {
+    // FIT_05R301F01.PV → FIT_05R301F01.ERR
+    const errNode = fitPvNode.replace('.PV', '.ERR');
+    return errVals[errNode];
+  }
+  
   let html = '';
   for (const n of ALL_NODES) {
     const fullId = 'ns=1;s=' + n;
@@ -194,10 +213,24 @@ function renderCards(results) {
     const isErr = qual !== 'Good' && qual !== '--';
     const cat = n.startsWith('FIT') ? 'FIT' : 'FIQ';
     const unit = cat === 'FIT' ? 'kg/h' : 'kg';
+    
+    // FIT 卡片的 meta 行用 ERR 值：0=Good，1=Bad（红色）
+    let metaHtml;
+    if (cat === 'FIT') {
+      const errVal = getErr(n);
+      // 数据有效(Quality=Good) 且 ERR=0 → Good，否则 Bad
+      const isGood = (qual === 'Good' && errVal === 0);
+      const statusText = isGood ? 'Good' : 'Bad';
+      const color = isGood ? '#3fb950' : '#f85149';
+      metaHtml = `<span style="color:${color}">${statusText}</span> · FIT`;
+    } else {
+      metaHtml = `${qual} · FIQ`;
+    }
+    
     html += `<div class="card${isErr ? ' err' : ''}">
       <div class="label">${n}</div>
       <div class="value">${val}<span class="unit">${unit}</span></div>
-      <div class="meta">${qual} · ${cat}</div>
+      <div class="meta">${metaHtml}</div>
     </div>`;
   }
   container.innerHTML = html;

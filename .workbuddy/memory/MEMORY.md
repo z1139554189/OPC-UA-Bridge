@@ -1,6 +1,6 @@
 # 工作区完整记忆
 
-> 更新时间：2026-05-25 14:40
+> 更新时间：2026-05-25 16:41
 > 工作区：`C:\Users\Administrator\WorkBuddy\2026-05-21-10-09-10\`
 > 记忆仓库：WorkBuddy workbuddy/memory/ + GitHub 仓库
 
@@ -32,6 +32,7 @@
 | 新增节点预热 | 新增到 config.py 的节点必须通过 API 预热订阅，否则 SQLite 无数据 |
 | git push | 由用户手动触发，不配置自动 push；用户说"推送"时默认推送所有有用内容（记忆、日志、代码等） |
 | 记忆管理 | 长期记忆统一在 WorkBuddy memory/ 同步到 Git 仓库 |
+| Dashboard 测试 | 页面改完后用 `?test` URL 参数模拟边界场景（如 ERR=1），验证通过后删除测试代码 |
 
 ---
 
@@ -53,7 +54,7 @@
 
 ---
 
-## 第四部分：OPC-UA-Bridge 项目（当前状态 2026-05-22）
+## 第四部分：OPC-UA-Bridge 项目（当前状态 2026-05-25）
 
 ### 项目概况
 
@@ -81,7 +82,8 @@
 |------|------|------|
 | FIT.PV | R301~R310 各 1 个（共 10） | 瞬时流量 kg/h |
 | FIQ.OUT | R301~R310 各 1 个（共 10） | 累计流量 |
-| 总计 | **20 节点** | 来源：`reporter/config.py` REPORT_NODES（唯一权威来源） |
+| FIT.ERR | R301~R310 各 1 个（共 10） | 传感器错误状态（0=正常，1=故障） |
+| 总计 | **30 节点** | 来源：`reporter/config.py` REPORT_NODES + `src/api/main.py` `_DEFAULT_NODE_IDS` |
 
 ### Windows 服务（当前）
 
@@ -98,13 +100,14 @@
 | 1（运行异常） | 重启 | 重启 |
 | 2（参数错误） | 不重启 | — |
 
-### Dashboard（2026-05-21 新增）
+### Dashboard（2026-05-21 新增，2026-05-25 功能增强）
 
 | 功能 | 说明 |
 |------|------|
-| 实时看板 | 3秒轮询 `/api/v1/cache/stats`，20 卡片（FIT 绿色 kg/h，FIQ 橙色） |
-| 历史查询 | `POST /api/v1/history/query`，时间桶采样，Chart.js 趋势图 |
-| Excel 导出 | `POST /api/v1/history/export`，固定时间桶对齐，每行一个间隔。**取值策略：取离桶起始时间最近的值**（`min(abs(record_ts - bucket_start))`），而非桶内最新记录 |
+| 实时看板 | 3秒轮询，30 卡片（FIT 绿色 kg/h + ERR 状态，FIQ 橙色 kg） |
+| FIT ERR 状态 | **2026-05-25 新增**：Quality=Good 且 ERR=0 → 绿色 Good，否则红色 Bad。批量查询 `ALL_BATCH_NODES` 含 ERR 节点，meta 行显示传感器健康状态 |
+| 历史查询 | `POST /api/v1/history/query`，时间桶采样，Chart.js 趋势图。复选框含 ERR 节点（红色 accent） |
+| Excel 导出 | `POST /api/v1/history/export`，固定时间桶对齐，每行一个间隔。**取值策略：取离桶起始时间最近的值**（`min(abs(record_ts - bucket_start))`） |
 | 远程访问 | 2026-05-22 修复 `localhost` 硬编码 → `window.location.origin`，Tailscale 组网可远程访问 |
 | FIQ 单位 | 2026-05-25 FIQ 卡片 + 趋势图 tooltip 显示 `kg`，Excel 导出 FIQ 列加 `"kg"` 后缀 |
 
@@ -124,8 +127,8 @@
 | 历史存储 | `src/storage/__init__.py` | HistoryDB 异步 SQLite（WAL、buffer 批量写入、7 天清理、分表） |
 | 调度器 | `reporter/scheduler.py` | 直读 SQLite + warmup 预热 + 文件锁检测 |
 | Excel 报表 | `reporter/excel_report.py` | 追加式报表 |
-| 报表配置 | `reporter/config.py` | 20 个 R3xx 节点（10 FIT PV + 10 FIQ OUT），间隔 1 分钟 |
-| Dashboard | `dashboard.html` | **新增**：纯静态看板，Chart.js 趋势图 + Excel 导出 |
+| 报表配置 | `reporter/config.py` | 30 个 R3xx 节点（10 FIT PV + 10 FIQ OUT + 10 FIT ERR），间隔 1 分钟 |
+| Dashboard | `dashboard.html` | 纯静态看板，Chart.js 趋势图 + Excel 导出。**2026-05-25 新增**：FIT 卡片 ERR 状态（Quality=Good 且 ERR=0 → 绿色 Good，否则红色 Bad）；历史查询复选框含 ERR 节点；批量查询扩展至 30 节点 |
 
 ---
 
