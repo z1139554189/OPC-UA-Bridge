@@ -104,9 +104,9 @@
 |------|------|
 | 实时看板 | 3秒轮询 `/api/v1/cache/stats`，20 卡片（FIT 绿色 kg/h，FIQ 橙色） |
 | 历史查询 | `POST /api/v1/history/query`，时间桶采样，Chart.js 趋势图 |
-| Excel 导出 | `POST /api/v1/history/export`，固定时间桶对齐，每行一个间隔 |
+| Excel 导出 | `POST /api/v1/history/export`，固定时间桶对齐，每行一个间隔。**取值策略：取离桶起始时间最近的值**（`min(abs(record_ts - bucket_start))`），而非桶内最新记录 |
 | 远程访问 | 2026-05-22 修复 `localhost` 硬编码 → `window.location.origin`，Tailscale 组网可远程访问 |
-| FIQ 单位 | 2026-05-25 FIQ 卡片 + 趋势图 tooltip 显示 `kg`，Excel 导出 FIQ 列加 `"kg"` 后缀，取最接近桶起始时间的值 |
+| FIQ 单位 | 2026-05-25 FIQ 卡片 + 趋势图 tooltip 显示 `kg`，Excel 导出 FIQ 列加 `"kg"` 后缀 |
 
 ### SQLite 历史库
 
@@ -183,6 +183,7 @@
 | # | 问题 | 根因 | 教训 |
 |---|------|------|------|
 | 9 | git push 只推代码漏推记忆文件 | 记忆文件和代码分属不同目录，AI 未自动关联 | **git push 必须同时推送 `.workbuddy/memory/` 全部文件**，已写入 `~/.workbuddy/MEMORY.md` 跨项目规则 |
+| 10 | Excel 导出历史数据取值策略不明确 | 时间桶内有多条记录时，"取最新"与"取最接近桶起始"结果不同 | **Excel 导出取离桶起始时间最近的值**（`min(abs(record_ts - bucket_start))`），而非桶内最新记录。适用于 `src/api/main.py` 历史导出接口 |
 
 ---
 
