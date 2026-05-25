@@ -193,7 +193,7 @@ function renderCards(results) {
     const qual = r ? (r.quality || '--') : '--';
     const isErr = qual !== 'Good' && qual !== '--';
     const cat = n.startsWith('FIT') ? 'FIT' : 'FIQ';
-    const unit = cat === 'FIT' ? 'kg/h' : '';
+    const unit = cat === 'FIT' ? 'kg/h' : 'kg';
     html += `<div class="card${isErr ? ' err' : ''}">
       <div class="label">${n}</div>
       <div class="value">${val}<span class="unit">${unit}</span></div>
@@ -274,7 +274,11 @@ function drawChart(data) {
         tooltip: {
           callbacks: {
             title: items => items.length ? new Date(items[0].parsed.x).toLocaleString('zh-CN') : '',
-            label: ctx => ctx.dataset.label + ': ' + Number(ctx.parsed.y).toFixed(2)
+            label: ctx => {
+              const v = Number(ctx.parsed.y).toFixed(2);
+              const unit = ctx.dataset.label.includes('FIQ') ? ' kg' : '';
+              return ctx.dataset.label + ': ' + v + unit;
+            }
           }
         }
       },

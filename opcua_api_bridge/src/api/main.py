@@ -451,8 +451,9 @@ async def batch_history_export(req: BatchHistoryRequest):
             node_id=node_id, start_time=req.start_time,
             end_time=req.end_time, max_points=50000,
         )
-        # 按桶分配：每个桶取最新一条数据
+        # 按桶分配：每个桶取离桶起始时间最近的值
         bucket_vals = {}
+        bucket_min_dist = {}
         for row in rows:
             try:
                 ts = datetime.fromisoformat(row["timestamp"]).timestamp()
@@ -461,8 +462,11 @@ async def batch_history_export(req: BatchHistoryRequest):
             if ts < start_ts or ts > end_ts:
                 continue
             bucket_idx = int((ts - start_ts) / interval)
-            # 取桶内最接近桶边界的数据
-            bucket_vals[bucket_idx] = row["value"]
+            bucket_start = start_ts + bucket_idx * interval
+            dist = abs(ts - bucket_start)
+            if bucket_idx not in bucket_vals or dist < bucket_min_dist[bucket_idx]:
+                bucket_vals[bucket_idx] = row["value"]
+                bucket_min_dist[bucket_idx] = dist
         all_series[node_id] = bucket_vals
 
     for row_idx, bucket_ts in enumerate(bucket_ts_list, start=2):
@@ -475,7 +479,11 @@ async def batch_history_export(req: BatchHistoryRequest):
             cell = ws.cell(row=row_idx, column=2 + col_offset, value=val)
             cell.border = thin_border
             if val is not None:
-                cell.number_format = '0.00'
+                # FIQ 累积流量加单位 kg
+                if "FIQ" in node_id.upper():
+                    cell.number_format = '0.00" kg"'
+                else:
+                    cell.number_format = '0.00'
 
     # 调整列宽
     ws.column_dimensions["A"].width = 22
