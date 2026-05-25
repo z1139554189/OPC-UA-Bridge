@@ -1,6 +1,6 @@
 # 工作区完整记忆
 
-> 更新时间：2026-05-25 16:41
+> 更新时间：2026-05-25 16:51
 > 工作区：`C:\Users\Administrator\WorkBuddy\2026-05-21-10-09-10\`
 > 记忆仓库：WorkBuddy workbuddy/memory/ + GitHub 仓库
 
@@ -128,7 +128,7 @@
 | 调度器 | `reporter/scheduler.py` | 直读 SQLite + warmup 预热 + 文件锁检测 |
 | Excel 报表 | `reporter/excel_report.py` | 追加式报表 |
 | 报表配置 | `reporter/config.py` | 30 个 R3xx 节点（10 FIT PV + 10 FIQ OUT + 10 FIT ERR），间隔 1 分钟 |
-| Dashboard | `dashboard.html` | 纯静态看板，Chart.js 趋势图 + Excel 导出。**2026-05-25 新增**：FIT 卡片 ERR 状态（Quality=Good 且 ERR=0 → 绿色 Good，否则红色 Bad）；历史查询复选框含 ERR 节点；批量查询扩展至 30 节点 |
+| Dashboard | `dashboard.html` | 纯静态看板，Chart.js 趋势图 + Excel 导出。**2026-05-25 新增**：FIT 卡片 ERR 状态（Quality=Good 且 ERR=0 → 绿色 Good，否则红色 Bad）；历史查询复选框含 ERR 节点；批量查询扩展至 30 节点。**同步路径**：Bridge 修改后需同步到 `~/.node-red/dashboard.html`（Node-RED 独立副本） |
 
 ---
 
