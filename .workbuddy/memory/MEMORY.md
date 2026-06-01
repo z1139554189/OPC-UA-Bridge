@@ -113,6 +113,7 @@
 | 实时卡片筛选 | WPS 下拉筛选（FIT+FIQ 分组）+ Good/Bad 状态切换 |
 | 卡片弹窗趋势图 | 单击卡片 → 实时图(3s更新, 200点滑动窗口) + 历史图(时间范围筛选, 全量原始数据) |
 | 弹窗 NaN 缺口 | value=null 时 push NaN，Chart.js 自动断线可视化 |
+| 弹窗 Excel 导出 | 导出弹窗中筛选时间范围的历史数据（非实时 buffer），CSV BOM UTF-8，文件名含时间范围 |
 | 版本 | **`dashboard.html` = V1.0 正式版**（2026-06-01 16:04 发布） |
 | 归档 | `dashboard_test.html`（v1）、`dashboard_test2.html`（v2）、`dashboard_test3.html`（v3） |
 | 同步路径 | Bridge 修改后需同步到 `~/.node-red/dashboard.html`（Node-RED 独立副本） |
@@ -207,6 +208,9 @@
 | 18 | 第三个下拉框（卡片筛选）函数名冲突 | 已有 `nodeEl`/`toggleDropdown` 等函数名被历史下拉框占用 | **用 `card` 前缀隔离命名空间**：`cardNodeEl`、`toggleCardDropdown`、`cardSelectAll` 等 |
 | 19 | dashboard_test2.html 功能验证通过 | 三版本并行（生产/v1/v2），纯增量叠加成功 | **命名空间隔离是叠加功能的正确方式**，`card` 前缀零冲突 |
 | 20 | dashboard_test3.html 弹窗双图表 | 实时图+历史图需要两套 Chart.js 实例分别管理 | **弹窗图表生命周期**：open 时创建 + 实时推送；close 时全部 destroy；query 时重建 canvas 防上下文污染 |
+| 21 | 弹窗 Excel 导出按钮无响应 | `a.download` 设了但 `a.href` 忘记赋值 | **浏览器下载三要素缺一不可**：`a.href = blobUrl` + `a.download = fileName` + `document.body.appendChild(a)` |
+| 22 | 弹窗导出数据源搞错 | 初版导出的是 `popupRtBuffer`（实时数据），用户要的是筛选时间范围的历史数据 | **弹窗导出 = 历史查询结果**，缓存最近一次 `queryPopupHistory()` 的响应用于导出 |
+| 23 | CSV 时间列被 Excel 截断到分钟 | Excel 自动把 `2026-05-30 20:47:15` 解析为日期格式，丢弃秒位 | **CSV 时间用 `="YYYY-MM-DD HH:MM:SS"` 包裹**，强制 Excel 文本模式，秒位不丢 |
 
 ---
 
