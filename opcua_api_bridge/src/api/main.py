@@ -310,6 +310,15 @@ async def dashboard_test():
     test_path = os.path.join(os.path.dirname(__file__), "..", "..", "dashboard_test.html")
     return FileResponse(test_path)
 
+# Dashboard 测试版2（测试版1 + 实时卡片筛选）
+@app.get("/dashboard_test2", tags=["可视化"])
+async def dashboard_test2():
+    """OPC UA 可视化看板（测试版2 — 含实时卡片 WPS 筛选）"""
+    from fastapi.responses import FileResponse
+    import os
+    test2_path = os.path.join(os.path.dirname(__file__), "..", "..", "dashboard_test2.html")
+    return FileResponse(test2_path)
+
 # Prometheus 指标端点
 @app.get("/metrics", tags=["监控"])
 async def metrics():
