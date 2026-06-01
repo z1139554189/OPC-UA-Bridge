@@ -1,6 +1,6 @@
 # 工作区完整记忆
 
-> 更新时间：2026-05-25 17:48
+> 更新时间：2026-06-01 13:06
 > 工作区：`C:\Users\Administrator\WorkBuddy\2026-05-21-10-09-10\`
 > 记忆仓库：WorkBuddy workbuddy/memory/ + GitHub 仓库
 
@@ -41,7 +41,7 @@
 | 项目 | 值 |
 |------|-----|
 | OS | Windows 10 22H2 (Build 19045)，用户 Administrator |
-| GitHub | 用户名 `z1139554189`，仓库 `OPC-UA-Bridge` |
+| GitHub | 用户名 `z1139554189`，仓库 `NodeRED`（2026-06-01 从 `Node-RED-` 迁移） |
 | Python | D:\opcua_venv（Python 3.13.12，managed 版创建） |
 | Git | D:\Program Files\Git，需绝对路径调用 |
 | Chrome | `C:\Program Files\Google\Chrome\Application\chrome.exe` |
@@ -61,7 +61,7 @@
 | 项目 | 值 |
 |------|-----|
 | 项目路径 | `C:\Users\Administrator\WorkBuddy\2026-05-21-10-09-10\OPC-UA-Bridge\opcua_api_bridge` |
-| GitHub | `https://github.com/z1139554189/OPC-UA-Bridge` |
+| GitHub | `https://github.com/z1139554189/NodeRED`（2026-06-01 仓库地址迁移） |
 | 技术栈 | FastAPI + asyncua + SQLite + openpyxl + Chart.js |
 | 版本 | v3.0.0 |
 
