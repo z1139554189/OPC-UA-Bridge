@@ -1,6 +1,6 @@
 # 工作区完整记忆
 
-> 更新时间：2026-06-01 13:06
+> 更新时间：2026-06-01 16:04
 > 工作区：`C:\Users\Administrator\WorkBuddy\2026-05-21-10-09-10\`
 > 记忆仓库：WorkBuddy workbuddy/memory/ + GitHub 仓库
 
@@ -100,18 +100,21 @@
 | 1（运行异常） | 重启 | 重启 |
 | 2（参数错误） | 不重启 | — |
 
-### Dashboard（2026-06-01 更新）
+### Dashboard（2026-06-01 V1.0 正式发布）
 
 | 功能 | 说明 |
 |------|------|
 | 实时看板 | 3秒轮询，30 卡片（FIT 绿色 kg/h + ERR 状态，FIQ 橙色 kg） |
-| FIT ERR 状态 | Quality=Good 且 ERR=0 → 绿色 Good，否则红色 Bad。批量查询 `ALL_BATCH_NODES` 含 ERR 节点 |
-| 历史查询 | WPS 风格下拉选择器（分组 FIT/FIQ/ERR、搜索过滤、全选/清空/选中搜索结果 + 空搜索 guard） |
-| Excel 导出 | 表头备注单位 `(kg)/(kg/h)/(0/1)`，数据格纯数值。取离桶起始时间最近的值 |
+| FIT/FIQ ERR 状态 | Quality=Good 且 ERR=0 → 绿色 Good，否则红色 Bad |
+| 历史查询 | WPS 风格下拉选择器（分组 FIT/FIQ/ERR、搜索过滤、全选/清空/选中搜索结果） |
+| Excel 导出 | 表头备注单位，数据格纯数值。取离桶起始时间最近的值 |
 | 远程访问 | `window.location.origin` 适配，Tailscale 可远程访问 |
-| 采样间隔 | 测试版新增 1秒/5秒 |
-| 实时卡片筛选 | **测试版2 新增**：WPS 下拉筛选（仅 FIT/FIQ，无 ERR），勾选控制卡片显示 |
-| 版本 | `dashboard.html`（生产）、`dashboard_test.html`（v1: WPS历史+1s/5s）、`dashboard_test2.html`（v2: v1+实时卡片WPS筛选+Good/Bad状态筛选，FIT/FIQ统一ERR判断）✅ 15:05 正式定版 |
+| 采样间隔 | 1s/5s/10s/30s/1m/5m/10m/30m/1h |
+| 实时卡片筛选 | WPS 下拉筛选（FIT+FIQ 分组）+ Good/Bad 状态切换 |
+| 卡片弹窗趋势图 | 单击卡片 → 实时图(3s更新, 200点滑动窗口) + 历史图(时间范围筛选, 全量原始数据) |
+| 弹窗 NaN 缺口 | value=null 时 push NaN，Chart.js 自动断线可视化 |
+| 版本 | **`dashboard.html` = V1.0 正式版**（2026-06-01 16:04 发布） |
+| 归档 | `dashboard_test.html`（v1）、`dashboard_test2.html`（v2）、`dashboard_test3.html`（v3） |
 | 同步路径 | Bridge 修改后需同步到 `~/.node-red/dashboard.html`（Node-RED 独立副本） |
 
 ### SQLite 历史库
@@ -203,6 +206,7 @@
 | 17 | 误读 GitHub"仓库迁移"提示，代码推到错误仓库 | push 输出含"迁移"提示，AI 擅自改 remote URL | **GitHub 仓库地址是用户指定的，绝不自行修改**。迁移提示 ≠ 改名指令 |
 | 18 | 第三个下拉框（卡片筛选）函数名冲突 | 已有 `nodeEl`/`toggleDropdown` 等函数名被历史下拉框占用 | **用 `card` 前缀隔离命名空间**：`cardNodeEl`、`toggleCardDropdown`、`cardSelectAll` 等 |
 | 19 | dashboard_test2.html 功能验证通过 | 三版本并行（生产/v1/v2），纯增量叠加成功 | **命名空间隔离是叠加功能的正确方式**，`card` 前缀零冲突 |
+| 20 | dashboard_test3.html 弹窗双图表 | 实时图+历史图需要两套 Chart.js 实例分别管理 | **弹窗图表生命周期**：open 时创建 + 实时推送；close 时全部 destroy；query 时重建 canvas 防上下文污染 |
 
 ---
 

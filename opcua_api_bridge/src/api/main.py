@@ -319,6 +319,14 @@ async def dashboard_test2():
     test2_path = os.path.join(os.path.dirname(__file__), "..", "..", "dashboard_test2.html")
     return FileResponse(test2_path)
 
+@app.get("/dashboard_test3", tags=["可视化"])
+async def dashboard_test3():
+    """OPC UA 可视化看板（测试版3 — 含卡片弹窗实时+历史趋势图）"""
+    from fastapi.responses import FileResponse
+    import os
+    test3_path = os.path.join(os.path.dirname(__file__), "..", "..", "dashboard_test3.html")
+    return FileResponse(test3_path)
+
 # Prometheus 指标端点
 @app.get("/metrics", tags=["监控"])
 async def metrics():
@@ -351,7 +359,7 @@ class BatchHistoryRequest(BaseModel):
     node_ids: List[str] = Field(..., description="节点ID列表，如 ['ns=1;s=FIT_05R301F01.PV']")
     start_time: str = Field(..., description="起始时间 ISO格式")
     end_time: str = Field(..., description="结束时间 ISO格式")
-    interval_seconds: int = Field(60, ge=1, le=3600, description="采样间隔（秒），默认60")
+    interval_seconds: int = Field(60, ge=0, le=3600, description="采样间隔（秒），默认60，0=全量原始数据")
 
 class BatchHistoryResponse(BaseModel):
     series: List[Dict[str, Any]]
