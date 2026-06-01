@@ -301,6 +301,15 @@ async def dashboard():
     dashboard_path = os.path.join(os.path.dirname(__file__), "..", "..", "dashboard.html")
     return FileResponse(dashboard_path)
 
+# Dashboard 测试版
+@app.get("/dashboard_test", tags=["可视化"])
+async def dashboard_test():
+    """OPC UA 可视化看板（测试版）"""
+    from fastapi.responses import FileResponse
+    import os
+    test_path = os.path.join(os.path.dirname(__file__), "..", "..", "dashboard_test.html")
+    return FileResponse(test_path)
+
 # Prometheus 指标端点
 @app.get("/metrics", tags=["监控"])
 async def metrics():
@@ -430,6 +439,13 @@ async def batch_history_export(req: BatchHistoryRequest):
     col_idx = 2
     for node_id in req.node_ids:
         display = node_id.split("s=")[-1] if "s=" in node_id else node_id
+        # 表头备注单位
+        if "FIQ" in display.upper():
+            display = f"{display} (kg)"
+        elif "FIT" in display.upper() and "ERR" not in display.upper():
+            display = f"{display} (kg/h)"
+        elif "ERR" in display.upper():
+            display = f"{display} (0/1)"
         cell = ws.cell(row=1, column=col_idx, value=display)
         cell.font = header_font
         cell.fill = header_fill
@@ -483,11 +499,7 @@ async def batch_history_export(req: BatchHistoryRequest):
             cell = ws.cell(row=row_idx, column=2 + col_offset, value=val)
             cell.border = thin_border
             if val is not None:
-                # FIQ 累积流量加单位 kg
-                if "FIQ" in node_id.upper():
-                    cell.number_format = '0.00" kg"'
-                else:
-                    cell.number_format = '0.00'
+                cell.number_format = '0.00'
 
     # 调整列宽
     ws.column_dimensions["A"].width = 22
