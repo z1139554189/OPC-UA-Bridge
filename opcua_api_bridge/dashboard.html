@@ -206,13 +206,13 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; b
     </div>
     <div class="modal-body">
       <div class="modal-left">
-        <div class="modal-chart-label">📡 实时趋势（每3秒更新，最近200点）</div>
+        <div class="modal-chart-label">📡 实时趋势（每0.5秒更新，最近200点）</div>
         <div class="modal-chart-wrap" id="popupRtWrap">
           <canvas id="popupRtChart"></canvas>
         </div>
       </div>
       <div class="modal-right">
-        <div class="modal-chart-label">📈 历史趋势（全量原始数据，无采样）</div>
+        <div class="modal-chart-label">📈 历史趋势（全量原始数据，无采样时间间隔）</div>
         <div class="modal-time-row">
           <div class="control-group">
             <label>开始时间</label>
@@ -948,8 +948,13 @@ function filterCards() {
 // 初始化
 renderCheckboxes();
 renderCardCheckboxes();
-pollRealtime();
-setInterval(pollRealtime, 3000);
+// 防重叠轮询：poll 跑完再等 500ms 才启动下一次
+let _pollTimer = null;
+async function startPollLoop() {
+  try { await pollRealtime(); } catch (_) {}
+  _pollTimer = setTimeout(startPollLoop, 500);
+}
+startPollLoop();
 </script>
 </body>
 </html>
