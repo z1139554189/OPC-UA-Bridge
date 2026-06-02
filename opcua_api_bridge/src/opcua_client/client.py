@@ -199,7 +199,7 @@ class OPCQuality:
 
 
 class _SubHandler:
-    """asyncua 订阅回调：持续收集推送值，写入 buffer 待批量落库。"""
+    """asyncua 订阅回调：推送到达时立即更新内存缓存，同时写入 buffer 待批量落库。"""
 
     def __init__(self, buffer: List[Dict[str, Any]], client_ref: 'OPCUAClient'):
         self._buffer = buffer
@@ -227,6 +227,14 @@ class _SubHandler:
             "timestamp": now_iso,
             "source": "push",  # 标记为推送数据
         })
+
+        # 立即更新内存缓存，看板 0.5s 轮询即可读到最新值，无需等 flush 周期
+        self._client_ref._value_cache[node_id] = {
+            "value": val,
+            "quality": quality,
+            "timestamp": now_iso,
+            "source": "push",
+        }
 
         # 更新最后推送时间（核心：用于判断连接是否真正存活）
         self._client_ref._last_push_time = time.time()

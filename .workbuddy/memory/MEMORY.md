@@ -1,6 +1,6 @@
 # 工作区完整记忆
 
-> 更新时间：2026-06-02 10:18
+> 更新时间：2026-06-02 16:00
 > 工作区：`C:\Users\Administrator\WorkBuddy\2026-05-21-10-09-10\`
 > 记忆仓库：WorkBuddy workbuddy/memory/ + GitHub 仓库
 
@@ -204,6 +204,7 @@
 | 24 | 用户问"看板刷新多久"，AI 回答趋势图而非卡片 | 同一 poll 函数同时驱动卡片和趋势图，AI 理解偏差 | **用户问卡片就答卡片，不要混淆**。虽然共享同一 poll 函数，但用户感知不同 |
 | 25 | setInterval 异步函数可能请求重叠 | setInterval 不管上次是否完成，到点就触发 | **异步轮询用 `setTimeout` 递归替代 `setInterval`**：`await poll()` → `setTimeout(loop, interval)` 防重叠雪崩 |
 | 26 | 改轮询间隔需同步更新弹窗标签 | 标签硬编码"每3秒"，改间隔后忘记更新 | **轮询间隔改完后检查所有含"秒"的 UI 文字**（实时趋势标签、注释等） |
+| 27 | OPC UA 推送到达后缓存更新延迟 2s | _SubHandler 只写 buffer，_value_cache 在 _flush_buffer 才更新 | **缓存和 SQLite 落库解耦**：推送回调里立即更新 _value_cache，SQLite 仍批量写。asyncio 单线程安全 | ✅ 2026-06-02 15:59 用户实测验证通过，"确实灵敏多了" |
 
 ### 2026-06-01 Dashboard 测试版教训
 | # | 问题 | 根因 | 教训 |
