@@ -1,6 +1,6 @@
 # 工作区完整记忆
 
-> 更新时间：2026-06-02 16:00
+> 更新时间：2026-06-05 13:30
 > 工作区：`C:\Users\Administrator\WorkBuddy\2026-05-21-10-09-10\`
 > 记忆仓库：WorkBuddy workbuddy/memory/ + GitHub 仓库
 
@@ -76,14 +76,16 @@
 | Read 支持 | ❌ 必须用 Subscription 订阅 |
 | 历史数据 | ❌ 不支持，桥接器自建 SQLite |
 
-### 当前订阅节点（与报表一致）
+### 当前订阅节点（2026-06-05 更新）
 
 | 类型 | 节点 | 说明 |
 |------|------|------|
 | FIT.PV | R301~R310 各 1 个（共 10） | 瞬时流量 kg/h |
 | FIQ.OUT | R301~R310 各 1 个（共 10） | 累计流量 |
 | FIT.ERR | R301~R310 各 1 个（共 10） | 传感器错误状态（0=正常，1=故障） |
-| 总计 | **30 节点** | 来源：`reporter/config.py` REPORT_NODES + `src/api/main.py` `_DEFAULT_NODE_IDS` |
+| IIAS.PV | 05A102~05A111 各 1 个（共 10） | 搅拌电机电流 A，量程 0-50A |
+| IIAS.ERR | 05A102~05A111 各 1 个（共 10） | 电机电流故障（0=正常，1=故障） |
+| 总计 | **50 节点** | |
 
 ### Windows 服务（当前）
 
@@ -115,6 +117,7 @@
 | 弹窗 NaN 缺口 | value=null 时 push NaN，Chart.js 自动断线可视化 |
 | 弹窗 Excel 导出 | 导出弹窗中筛选时间范围的历史数据（非实时 buffer），CSV BOM UTF-8，文件名含时间范围 |
 | 版本 | **`dashboard.html` = V1.1 正式版**（2026-06-02 10:18 发布） |
+| 测试版4 | `dashboard_test4.html`（2026-06-05，新增 IIAS 搅拌电机电流卡片） |
 | 归档 | `dashboard_test.html`（v1）、`dashboard_test2.html`（v2）、`dashboard_test3.html`（v3） |
 | 同步路径 | Bridge 修改后需同步到 `~/.node-red/dashboard.html`（Node-RED 独立副本） |
 

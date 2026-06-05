@@ -1,0 +1,977 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>OPC UA Dashboard (Test4 - IIAS)</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.8/dist/chart.umd.min.js"></script>
+<style>
+:root { --bg: #0d1117; --card: #161b22; --border: #30363d; --text: #c9d1d9; --text2: #8b949e; --accent: #58a6ff; --green: #3fb950; --red: #f85149; --orange: #d29922; }
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; }
+.header { background: var(--card); border-bottom: 1px solid var(--border); padding: 12px 24px; display: flex; align-items: center; justify-content: space-between; }
+.header h1 { font-size: 18px; color: var(--accent); }
+.header .status { font-size: 12px; padding: 4px 10px; border-radius: 12px; }
+.header .status.online { background: #1a3a1a; color: var(--green); }
+.header .status.offline { background: #3a1a1a; color: var(--red); }
+.main { padding: 16px 24px; display: flex; flex-direction: column; gap: 16px; }
+.cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 10px; }
+.card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; cursor: pointer; transition: border-color 0.15s; }
+.card:hover { border-color: var(--accent); }
+.card .label { font-size: 11px; color: var(--text2); margin-bottom: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.card .value { font-size: 24px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.card .unit { font-size: 12px; color: var(--text2); margin-left: 4px; }
+.card .meta { font-size: 10px; color: var(--text2); margin-top: 4px; }
+.card.err { border-color: var(--red); }
+.panel { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 16px; }
+.panel h2 { font-size: 14px; color: var(--accent); margin-bottom: 12px; }
+.controls { display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-end; margin-bottom: 12px; }
+.control-group { display: flex; flex-direction: column; gap: 4px; }
+.control-group label { font-size: 11px; color: var(--text2); }
+.control-group input, .control-group select { background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px; font-size: 13px; outline: none; }
+.control-group input:focus, .control-group select:focus { border-color: var(--accent); }
+/* 节点下拉选择器（WPS 筛选风格） */
+.node-dropdown { position: relative; }
+.node-dropdown-btn { background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px; font-size: 13px; cursor: pointer; display: flex; align-items: center; gap: 6px; min-width: 180px; user-select: none; }
+.node-dropdown-btn:hover { border-color: var(--accent); }
+.node-dropdown-btn .badge { background: var(--accent); color: #fff; border-radius: 10px; padding: 1px 7px; font-size: 11px; font-weight: 700; }
+.node-dropdown-panel { display: none; position: absolute; top: calc(100% + 4px); left: 0; z-index: 100; background: var(--card); border: 1px solid var(--border); border-radius: 8px; min-width: 520px; max-height: 420px; overflow: hidden; box-shadow: 0 8px 24px rgba(0,0,0,0.4); }
+.node-dropdown-panel.open { display: flex; flex-direction: column; }
+.dd-search { padding: 8px 10px; border-bottom: 1px solid var(--border); }
+.dd-search input { width: 100%; background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px; font-size: 13px; outline: none; }
+.dd-search input:focus { border-color: var(--accent); }
+.dd-actions { padding: 6px 10px; border-bottom: 1px solid var(--border); display: flex; gap: 6px; }
+.dd-action-btn { font-size: 11px; cursor: pointer; padding: 2px 10px; border-radius: 4px; border: 1px solid var(--border); background: var(--bg); color: var(--text); }
+.dd-action-btn:hover { border-color: var(--accent); color: var(--accent); }
+.dd-status-bar { padding: 4px 10px; border-bottom: 1px solid var(--border); display: flex; gap: 4px; align-items: center; }
+.dd-status-bar .status-label { font-size: 10px; color: var(--text2); margin-right: 4px; }
+.dd-status-btn { font-size: 10px; cursor: pointer; padding: 2px 10px; border-radius: 10px; border: 1px solid var(--border); background: var(--bg); color: var(--text2); transition: all 0.15s; }
+.dd-status-btn:hover { border-color: var(--accent); color: var(--accent); }
+.dd-status-btn.active-all { border-color: var(--accent); background: rgba(88,166,255,0.12); color: var(--accent); }
+.dd-status-btn.active-good { border-color: var(--green); background: rgba(63,185,80,0.12); color: var(--green); }
+.dd-status-btn.active-bad { border-color: var(--red); background: rgba(248,81,73,0.12); color: var(--red); }
+.dd-groups { overflow-y: auto; flex: 1; padding: 6px 10px; }
+.node-group { margin-bottom: 10px; }
+.node-group-header { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; font-size: 11px; color: var(--text2); font-weight: 600; letter-spacing: 0.5px; }
+.node-group-header .grp-cnt { font-size: 10px; color: var(--text2); margin-left: 4px; }
+.node-group-items { display: flex; flex-wrap: wrap; gap: 5px; }
+.node-group-items label { display: flex; align-items: center; gap: 4px; font-size: 12px; cursor: pointer; padding: 3px 8px; border-radius: 4px; border: 1px solid var(--border); background: var(--bg); }
+.node-group-items label:hover { border-color: var(--accent); }
+.node-group-items label.checked { border-color: var(--accent); background: rgba(88,166,255,0.10); }
+.node-group-items input[type=checkbox] { accent-color: var(--accent); }
+.node-group-hidden { display: none; }
+.card-hidden { display: none !important; }
+/* 弹窗遮罩 */
+.modal-overlay { display: none; position: fixed; inset: 0; z-index: 200; background: rgba(0,0,0,0.7); justify-content: center; align-items: center; }
+.modal-overlay.open { display: flex; }
+.modal { background: var(--card); border: 1px solid var(--border); border-radius: 12px; width: 96vw; max-width: 1500px; max-height: 95vh; display: flex; flex-direction: column; overflow: hidden; }
+.modal-header { display: flex; align-items: center; justify-content: space-between; padding: 18px 24px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
+.modal-header h3 { font-size: 16px; color: var(--accent); margin: 0; }
+.modal-close { background: none; border: 1px solid var(--border); color: var(--text2); font-size: 18px; cursor: pointer; padding: 4px 10px; border-radius: 6px; line-height: 1; }
+.modal-close:hover { border-color: var(--red); color: var(--red); }
+.modal-export { background: none; border: 1px solid var(--border); color: var(--text2); font-size: 12px; cursor: pointer; padding: 5px 14px; border-radius: 6px; margin-right: 8px; }
+.modal-export:hover { border-color: var(--green); color: var(--green); }
+.modal-body { display: flex; gap: 20px; padding: 20px 24px; overflow-y: auto; flex: 1; }
+.modal-left { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.modal-right { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 10px; }
+.modal-chart-label { font-size: 12px; color: var(--text2); margin-bottom: 4px; }
+.modal-chart-wrap { flex: 1; min-height: 380px; position: relative; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); padding: 8px; }
+.modal-time-row { display: flex; gap: 8px; align-items: flex-end; flex-wrap: wrap; }
+.modal-time-row .control-group { flex: 1; min-width: 150px; }
+.modal-time-row .control-group input { font-size: 12px; padding: 5px 8px; }
+.modal-time-row .btn { font-size: 12px; padding: 5px 14px; }
+.btn { background: var(--accent); color: #fff; border: none; border-radius: 6px; padding: 7px 16px; font-size: 13px; cursor: pointer; font-weight: 600; }
+.btn:hover { opacity: 0.85; }
+.btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.btn-outline { background: transparent; border: 1px solid var(--border); color: var(--text); }
+.chart-container { width: 100%; height: 400px; position: relative; }
+.loading { text-align: center; padding: 40px; color: var(--text2); }
+.toast { position: fixed; bottom: 24px; right: 24px; background: var(--accent); color: #fff; padding: 10px 20px; border-radius: 8px; font-size: 13px; z-index: 999; animation: fadein .3s; }
+@keyframes fadein { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>OPC UA Bridge Dashboard <span style="font-size:12px;color:var(--green);font-weight:normal;background:#1a2a1a;border-radius:4px;padding:2px 8px;margin-left:8px">Test4-IIAS</span></h1>
+  <span class="status" id="connStatus">连接中...</span>
+</div>
+
+<div class="main">
+  <!-- 实时数据卡片区 -->
+  <div class="panel">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;gap:12px;">
+      <h2 style="margin-bottom:0">📊 实时数据</h2>
+      <div class="node-dropdown" id="cardDropdown" style="min-width:280px;">
+        <div class="node-dropdown-btn" onclick="toggleCardDropdown()" style="min-width:220px;">
+          <span id="cardDropdownLabel">全部位号</span>
+          <span class="badge" id="cardSelectedBadge" style="display:none">0</span>
+          <span style="margin-left:auto;font-size:10px;color:var(--text2)">▼</span>
+        </div>
+        <div class="node-dropdown-panel" id="cardCheckboxes" style="min-width:400px;">
+          <div class="dd-search">
+            <input type="text" id="cardSearch" placeholder="🔍 搜索位号..." oninput="cardFilterNodes(this.value)">
+          </div>
+          <div class="dd-actions">
+            <button class="dd-action-btn" onclick="cardSelectAll(true)">全选</button>
+            <button class="dd-action-btn" onclick="cardSelectAll(false)">清空</button>
+            <button class="dd-action-btn" onclick="cardSelectAllVisible(true)">选中搜索结果</button>
+          </div>
+          <div class="dd-status-bar">
+            <span class="status-label">状态：</span>
+            <button class="dd-status-btn active-all" id="cardStatusAllBtn" onclick="cardSetStatusFilter('all')">全部</button>
+            <button class="dd-status-btn" id="cardStatusGoodBtn" onclick="cardSetStatusFilter('good')">Good</button>
+            <button class="dd-status-btn" id="cardStatusBadBtn" onclick="cardSetStatusFilter('bad')">Bad</button>
+          </div>
+          <div class="dd-groups" id="cardGroups"></div>
+        </div>
+      </div>
+    </div>
+    <div class="cards" id="realtimeCards"></div>
+  </div>
+
+  <!-- 历史查询区 -->
+  <div class="panel">
+    <h2>📈 历史数据查询</h2>
+    <div class="controls">
+      <div class="control-group">
+        <label>开始时间</label>
+        <input type="datetime-local" id="startTime">
+      </div>
+      <div class="control-group">
+        <label>结束时间</label>
+        <input type="datetime-local" id="endTime">
+      </div>
+      <div class="control-group">
+        <label>采样间隔</label>
+        <select id="interval">
+          <option value="1">1秒</option>
+          <option value="5">5秒</option>
+          <option value="10">10秒</option>
+          <option value="30">30秒</option>
+          <option value="60" selected>1分钟</option>
+          <option value="300">5分钟</option>
+          <option value="600">10分钟</option>
+          <option value="1800">30分钟</option>
+          <option value="3600">1小时</option>
+        </select>
+      </div>
+      <div class="control-group">
+        <label>选择位号</label>
+        <div class="node-dropdown" id="nodeDropdown">
+          <div class="node-dropdown-btn" onclick="toggleDropdown()">
+            <span id="dropdownLabel">未选择位号</span>
+            <span class="badge" id="selectedBadge" style="display:none">0</span>
+            <span style="margin-left:auto;font-size:10px;color:var(--text2)">▼</span>
+          </div>
+          <div class="node-dropdown-panel" id="nodeCheckboxes">
+            <div class="dd-search">
+              <input type="text" id="ddSearch" placeholder="🔍 搜索位号..." oninput="filterNodes(this.value)">
+            </div>
+            <div class="dd-actions">
+              <button class="dd-action-btn" onclick="selectAll(true)">全选</button>
+              <button class="dd-action-btn" onclick="selectAll(false)">清空</button>
+              <button class="dd-action-btn" onclick="selectAllVisible(true)">选中搜索结果</button>
+            </div>
+            <div class="dd-groups" id="ddGroups"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div style="margin-top:10px; display:flex; gap:8px;">
+      <button class="btn" id="btnQuery" onclick="queryHistory()">🔍 查询</button>
+      <button class="btn btn-outline" id="btnExport" onclick="exportExcel()" disabled>📥 导出 Excel</button>
+    </div>
+  </div>
+
+  <!-- 图表区 -->
+  <div class="panel">
+    <h2>📉 趋势图</h2>
+    <div class="chart-container" id="chartWrapper">
+      <canvas id="historyChart"></canvas>
+    </div>
+    <div id="chartEmpty" class="loading" style="display:none">请选择节点并点击"查询"</div>
+  </div>
+</div>
+
+<!-- 卡片弹窗 -->
+<div class="modal-overlay" id="popupOverlay" onclick="if(event.target===this) return">
+  <div class="modal">
+    <div class="modal-header">
+      <h3 id="popupTitle">节点趋势</h3>
+      <div style="display:flex;align-items:center;gap:8px">
+        <button class="modal-export" onclick="exportPopupExcel()">📥 导出 Excel</button>
+        <button class="modal-close" onclick="closePopup()">✕</button>
+      </div>
+    </div>
+    <div class="modal-body">
+      <div class="modal-left">
+        <div class="modal-chart-label">📡 实时趋势（每0.5秒更新，最近200点）</div>
+        <div class="modal-chart-wrap" id="popupRtWrap">
+          <canvas id="popupRtChart"></canvas>
+        </div>
+      </div>
+      <div class="modal-right">
+        <div class="modal-chart-label">📈 历史趋势（全量原始数据，无采样时间间隔）</div>
+        <div class="modal-time-row">
+          <div class="control-group">
+            <label>开始时间</label>
+            <input type="datetime-local" id="popupStartTime">
+          </div>
+          <div class="control-group">
+            <label>结束时间</label>
+            <input type="datetime-local" id="popupEndTime">
+          </div>
+          <button class="btn" id="popupBtnQuery" onclick="queryPopupHistory()">🔍 查询</button>
+        </div>
+        <div class="modal-chart-wrap" id="popupHistWrap" style="flex:1;min-height:250px;">
+          <canvas id="popupHistChart"></canvas>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+const BASE = window.location.origin;
+
+// 所有已知节点
+const ALL_NODES_FIT = ['FIT_05R301F01.PV','FIT_05R302F01.PV','FIT_05R303F01.PV','FIT_05R304F01.PV','FIT_05R305F01.PV','FIT_05R306F01.PV','FIT_05R307F01.PV','FIT_05R308F01.PV','FIT_05R309F01.PV','FIT_05R310F01.PV'];
+const ALL_NODES_FIQ = ['FIQ_05R301F01.OUT','FIQ_05R302F01.OUT','FIQ_05R303F01.OUT','FIQ_05R304F01.OUT','FIQ_05R305F01.OUT','FIQ_05R306F01.OUT','FIQ_05R307F01.OUT','FIQ_05R308F01.OUT','FIQ_05R309F01.OUT','FIQ_05R310F01.OUT'];
+const ALL_NODES_ERR = ['FIT_05R301F01.ERR','FIT_05R302F01.ERR','FIT_05R303F01.ERR','FIT_05R304F01.ERR','FIT_05R305F01.ERR','FIT_05R306F01.ERR','FIT_05R307F01.ERR','FIT_05R308F01.ERR','FIT_05R309F01.ERR','FIT_05R310F01.ERR'];
+// IIAS 搅拌电机电流节点（磺化釜 05A102~05A111，量程 0-50A）
+const ALL_NODES_IIAS = ['IIAS_05A102.PV','IIAS_05A103.PV','IIAS_05A104.PV','IIAS_05A105.PV','IIAS_05A106.PV','IIAS_05A107.PV','IIAS_05A108.PV','IIAS_05A109.PV','IIAS_05A110.PV','IIAS_05A111.PV'];
+const ALL_NODES_IIAS_ERR = ['IIAS_05A102.ERR','IIAS_05A103.ERR','IIAS_05A104.ERR','IIAS_05A105.ERR','IIAS_05A106.ERR','IIAS_05A107.ERR','IIAS_05A108.ERR','IIAS_05A109.ERR','IIAS_05A110.ERR','IIAS_05A111.ERR'];
+const ALL_NODES = [...ALL_NODES_FIT, ...ALL_NODES_FIQ, ...ALL_NODES_IIAS];
+// 批量查询包含 ERR 节点（用于卡片状态显示），但不单独渲染 ERR 卡片
+const ALL_BATCH_NODES = [...ALL_NODES, ...ALL_NODES_ERR, ...ALL_NODES_IIAS_ERR];
+
+let chart = null;
+let lastQueryData = null;
+
+// ==================== 弹窗相关（测试版3 新增） ====================
+let popupNode = null;          // 当前弹窗跟踪的节点名
+let popupRtBuffer = [];        // 实时数据缓冲 [{timestamp, value}]
+let popupRtChart = null;       // 弹窗实时 Chart.js 实例
+let popupHistChart = null;     // 弹窗历史 Chart.js 实例
+let popupHistData = null;     // 弹窗最近一次历史查询结果（用于导出）
+const POPUP_MAX_POINTS = 200;  // 实时图最多保留点数
+
+// 初始化时间
+const now = new Date();
+document.getElementById('endTime').value = toLocalISO(now);
+document.getElementById('startTime').value = toLocalISO(new Date(now - 3600000));
+
+function toLocalISO(d) {
+  const off = d.getTimezoneOffset();
+  const local = new Date(d.getTime() - off * 60000);
+  return local.toISOString().slice(0, 16);
+}
+
+// 节点分组定义
+const NODE_GROUPS = [
+  { name: 'FIT 瞬时流量', color: '#3fb950', nodes: ALL_NODES_FIT },
+  { name: 'FIQ 累计流量', color: '#d29922', nodes: ALL_NODES_FIQ },
+  { name: 'ERR 传感器状态', color: '#f85149', nodes: ALL_NODES_ERR },
+  { name: 'IIAS 搅拌电机电流', color: '#58a6ff', nodes: ALL_NODES_IIAS },
+  { name: 'IIAS ERR 电流故障', color: '#f85149', nodes: ALL_NODES_IIAS_ERR },
+];
+
+// 用 data-node 属性存位号名，规避 id 里 '.' 在 querySelector 的歧义
+function nodeEl(n) {
+  return document.querySelector(`[data-node="${n}"]`);
+}
+function nodeCb(n) {
+  const el = nodeEl(n);
+  return el ? el.querySelector('input') : null;
+}
+
+// 下拉面板控制
+function toggleDropdown() {
+  const panel = document.getElementById('nodeCheckboxes');
+  panel.classList.toggle('open');
+  if (panel.classList.contains('open')) {
+    document.getElementById('ddSearch').value = '';
+    filterNodes('');
+    setTimeout(() => document.addEventListener('click', closeOutside, { once: true }), 10);
+  }
+}
+function closeOutside(e) {
+  const dd = document.getElementById('nodeDropdown');
+  if (!dd.contains(e.target)) {
+    document.getElementById('nodeCheckboxes').classList.remove('open');
+  } else {
+    document.addEventListener('click', closeOutside, { once: true });
+  }
+}
+
+// 渲染分组（只需渲染一次）
+function renderCheckboxes() {
+  const container = document.getElementById('ddGroups');
+  let html = '';
+  for (const g of NODE_GROUPS) {
+    html += `<div class="node-group" data-group="${g.name}">
+      <div class="node-group-header">
+        <span style="color:${g.color}">● ${g.name}</span>
+        <span class="grp-cnt" id="cnt_${g.name}"></span>
+      </div>
+      <div class="node-group-items">`;
+    for (const n of g.nodes) {
+      html += `<label data-node="${n}" data-group="${g.name}"><input type="checkbox" value="${n}" onchange="toggleCheck(this)" style="accent-color:${g.color}"><span style="color:${g.color}">${n}</span></label>`;
+    }
+    html += '</div></div>';
+  }
+  container.innerHTML = html;
+  updateLabel();
+}
+
+function toggleCheck(cb) {
+  const lbl = nodeEl(cb.value);
+  if (lbl) {
+    if (cb.checked) lbl.classList.add('checked');
+    else lbl.classList.remove('checked');
+  }
+  updateLabel();
+}
+
+// 全选 / 清空（对所有项操作）
+function selectAll(state) {
+  const all = [...ALL_NODES_FIT, ...ALL_NODES_FIQ, ...ALL_NODES_ERR, ...ALL_NODES_IIAS, ...ALL_NODES_IIAS_ERR];
+  all.forEach(n => {
+    const cb = nodeCb(n);
+    if (cb) { cb.checked = state; toggleCheck(cb); }
+  });
+}
+
+// 选中/取消当前搜索可见的结果
+function selectAllVisible(state) {
+  // 搜索框为空时不操作
+  if (!document.getElementById('ddSearch').value.trim()) return;
+  const visibleLabels = document.querySelectorAll('#ddGroups label:not(.node-group-hidden)');
+  visibleLabels.forEach(lbl => {
+    const cb = lbl.querySelector('input');
+    if (cb) { cb.checked = state; toggleCheck(cb); }
+  });
+}
+
+// 模糊搜索过滤
+function filterNodes(query) {
+  const q = query.trim().toLowerCase();
+  for (const g of NODE_GROUPS) {
+    let visibleCount = 0;
+    for (const n of g.nodes) {
+      const lbl = nodeEl(n);
+      if (!lbl) continue;
+      const match = !q || n.toLowerCase().includes(q);
+      lbl.classList.toggle('node-group-hidden', !match);
+      if (match) visibleCount++;
+    }
+    // 更新每组可见数量
+    const cntEl = document.getElementById('cnt_' + g.name);
+    if (cntEl) cntEl.textContent = q ? `${visibleCount}/${g.nodes.length}` : '';
+    // 组内全部隐藏则折叠整组
+    const grpEl = document.querySelector(`[data-group="${g.name}"].node-group`);
+    if (grpEl) grpEl.style.display = visibleCount === 0 ? 'none' : '';
+  }
+}
+
+// 更新按钮标签
+function updateLabel() {
+  const cbs = document.querySelectorAll('#ddGroups input:checked');
+  const n = cbs.length;
+  const badge = document.getElementById('selectedBadge');
+  const label = document.getElementById('dropdownLabel');
+  if (n === 0) { label.textContent = '未选择位号'; badge.style.display = 'none'; }
+  else { label.textContent = '已选 ' + n + ' 个位号'; badge.textContent = n; badge.style.display = ''; }
+}
+
+// 获取选中节点（返回完整 node_id）
+function getSelectedNodes() {
+  const cbs = document.querySelectorAll('#ddGroups input:checked');
+  return Array.from(cbs).map(c => 'ns=1;s=' + c.value);
+}
+
+// 实时数据轮询
+async function pollRealtime() {
+  try {
+    const [healthResp, cacheResp] = await Promise.all([
+      fetch(BASE + '/health'),
+      fetch(BASE + '/api/v1/cache/stats')
+    ]);
+    const health = await healthResp.json();
+    const cache = await cacheResp.json();
+    
+    const s = document.getElementById('connStatus');
+    if (health.opcua_connected) {
+      s.textContent = '● 已连接';
+      s.className = 'status online';
+    } else {
+      s.textContent = '● 未连接';
+      s.className = 'status offline';
+    }
+
+    // 批量查询包含 ERR 节点（用于 FIT 卡片状态）
+    const batchBody = JSON.stringify(ALL_BATCH_NODES.map(n => 'ns=1;s=' + n));
+    const valsResp = await fetch(BASE + '/api/v1/nodes/batch-read', {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: batchBody
+    });
+    const valsData = await valsResp.json();
+    
+    renderCards(valsData.results || []);
+    
+    // 弹窗实时数据推送
+    if (popupNode) {
+      const popupResult = (valsData.results || []).find(r => r.node_id === 'ns=1;s=' + popupNode);
+      if (popupResult) {
+        const v = popupResult.value !== null ? Number(popupResult.value) : NaN;
+        popupRtBuffer.push({ timestamp: new Date(), value: v });
+        if (popupRtBuffer.length > POPUP_MAX_POINTS) popupRtBuffer.shift();
+        updatePopupRtChart();
+      }
+    }
+  } catch (e) {
+    document.getElementById('connStatus').textContent = '● 断开';
+    document.getElementById('connStatus').className = 'status offline';
+  }
+}
+
+function renderCards(results) {
+  const container = document.getElementById('realtimeCards');
+  const map = {};
+  for (const r of results) map[r.node_id] = r;
+  
+  // 建立 FIT ERR 查询映射：FIT_05R3xxF01.ERR 的值
+  const errVals = {};
+  for (const en of ALL_NODES_ERR) {
+    const r = map['ns=1;s=' + en];
+    errVals[en] = r && r.value !== null ? Number(r.value) : null;
+  }
+  // 建立 IIAS ERR 查询映射：IIAS_05Axxx.ERR 的值
+  const iiasErrVals = {};
+  for (const en of ALL_NODES_IIAS_ERR) {
+    const r = map['ns=1;s=' + en];
+    iiasErrVals[en] = r && r.value !== null ? Number(r.value) : null;
+  }
+  // 便捷函数：根据 FIT.PV 节点名找对应 ERR 节点值
+  function getErr(fitPvNode) {
+    // FIT_05R301F01.PV → FIT_05R301F01.ERR
+    const errNode = fitPvNode.replace('.PV', '.ERR');
+    return errVals[errNode];
+  }
+  // FIQ 节点也关联 ERR：FIQ_05R301F01.OUT → FIT_05R301F01.ERR
+  function getErrForFiq(fiqNode) {
+    const errNode = fiqNode.replace('FIQ_', 'FIT_').replace('.OUT', '.ERR');
+    return errVals[errNode];
+  }
+  // IIAS 节点关联 IIAS ERR：IIAS_05A102.PV → IIAS_05A102.ERR
+  function getErrForIias(iiasPvNode) {
+    const errNode = iiasPvNode.replace('.PV', '.ERR');
+    return iiasErrVals[errNode];
+  }
+  
+  let html = '';
+  for (const n of ALL_NODES) {
+    const fullId = 'ns=1;s=' + n;
+    const r = map[fullId];
+    const val = r && r.value !== null ? Number(r.value).toFixed(2) : '--';
+    const qual = r ? (r.quality || '--') : '--';
+    let cat, unit, errVal;
+    if (n.startsWith('FIT')) { cat = 'FIT'; unit = 'kg/h'; errVal = getErr(n); }
+    else if (n.startsWith('FIQ')) { cat = 'FIQ'; unit = 'kg'; errVal = getErrForFiq(n); }
+    else { cat = 'IIAS'; unit = 'A'; errVal = getErrForIias(n); }
+    
+    // meta 行统一用 ERR 判断 Good/Bad
+    const isGood = (qual === 'Good' && errVal === 0);
+    const statusText = isGood ? 'Good' : 'Bad';
+    const color = isGood ? '#3fb950' : '#f85149';
+    const metaHtml = `<span style="color:${color}">${statusText}</span> · ${cat}`;
+    
+    const isErr = qual !== 'Good' || (errVal !== null && errVal !== 0);
+    
+    html += `<div class="card${isErr ? ' err' : ''}" data-card-node="${n}" onclick="openPopup('${n}')">
+      <div class="label">${n}</div>
+      <div class="value">${val}<span class="unit">${unit}</span></div>
+      <div class="meta">${metaHtml}</div>
+    </div>`;
+  }
+  container.innerHTML = html;
+  filterCards(); // 保持筛选状态
+}
+
+// 历史查询
+async function queryHistory() {
+  const nodes = getSelectedNodes();
+  if (nodes.length === 0) { toast('请至少选择一个节点'); return; }
+
+  const btn = document.getElementById('btnQuery');
+  btn.disabled = true;
+  btn.textContent = '查询中...';
+
+  const body = {
+    node_ids: nodes,
+    start_time: document.getElementById('startTime').value + ':00',
+    end_time: document.getElementById('endTime').value + ':00',
+    interval_seconds: parseInt(document.getElementById('interval').value)
+  };
+
+  try {
+    const resp = await fetch(BASE + '/api/v1/history/query', {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)
+    });
+    const data = await resp.json();
+    lastQueryData = data;
+    drawChart(data);
+    document.getElementById('btnExport').disabled = false;
+    document.getElementById('chartEmpty').style.display = 'none';
+    toast(`查询完成，共 ${data.total_points} 个数据点`);
+  } catch (e) {
+    toast('查询失败: ' + e.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '🔍 查询';
+  }
+}
+
+function drawChart(data) {
+  // 销毁旧图表并重建 canvas（Chart.js destroy() 不能彻底清空上下文）
+  if (chart) { chart.destroy(); chart = null; }
+  const wrapper = document.getElementById('chartWrapper');
+  const oldCanvas = document.getElementById('historyChart');
+  if (oldCanvas) oldCanvas.remove();
+  const newCanvas = document.createElement('canvas');
+  newCanvas.id = 'historyChart';
+  wrapper.appendChild(newCanvas);
+
+  const ctx = newCanvas.getContext('2d');
+
+  const colors = ['#58a6ff','#3fb950','#d29922','#f85149','#bc8cff','#79c0ff','#f0883e','#a5d6ff','#ff7b72','#d2a8ff',
+                  '#56d364','#e3b341','#f0883e','#db6d28','#7ee787','#f78166','#a371f7','#58a6ff','#3fb950','#d29922'];
+  
+  const datasets = data.series.map((s, i) => ({
+    label: s.display_name,
+    data: s.points.map(p => ({ x: new Date(p.timestamp).getTime(), y: p.value })),
+    borderColor: colors[i % colors.length],
+    backgroundColor: colors[i % colors.length] + '20',
+    borderWidth: 1.5,
+    pointRadius: 0,
+    tension: 0.1,
+  }));
+
+  chart = new Chart(ctx, {
+    type: 'line',
+    data: { datasets },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { labels: { color: '#8b949e', usePointStyle: true, boxWidth: 8, padding: 12 } },
+        tooltip: {
+          callbacks: {
+            title: items => items.length ? new Date(items[0].parsed.x).toLocaleString('zh-CN') : '',
+            label: ctx => {
+              const v = Number(ctx.parsed.y).toFixed(2);
+              const unit = ctx.dataset.label.includes('FIQ') ? ' kg' : '';
+              return ctx.dataset.label + ': ' + v + unit;
+            }
+          }
+        }
+      },
+      scales: {
+        x: {
+          type: 'linear',
+          ticks: {
+            color: '#8b949e',
+            maxTicksLimit: 15,
+            callback: function(v) {
+              const d = new Date(v);
+              const pad = n => String(n).padStart(2, '0');
+              return pad(d.getMonth()+1)+'-'+pad(d.getDate())+' '+pad(d.getHours())+':'+pad(d.getMinutes());
+            }
+          },
+          grid: { color: '#21262d' }
+        },
+        y: {
+          ticks: { color: '#8b949e', callback: v => Number(v).toFixed(2) },
+          grid: { color: '#21262d' }
+        }
+      }
+    }
+  });
+}
+
+// 导出 Excel
+async function exportExcel() {
+  if (!lastQueryData) return;
+  const nodes = getSelectedNodes();
+  if (nodes.length === 0) return;
+
+  const body = {
+    node_ids: nodes,
+    start_time: document.getElementById('startTime').value + ':00',
+    end_time: document.getElementById('endTime').value + ':00',
+    interval_seconds: parseInt(document.getElementById('interval').value)
+  };
+
+  try {
+    const resp = await fetch(BASE + '/api/v1/history/export', {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)
+    });
+    const blob = await resp.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = resp.headers.get('Content-Disposition')?.match(/filename="(.+)"/)?.[1] || 'report.xlsx';
+    a.click();
+    URL.revokeObjectURL(url);
+    toast('报表已下载');
+  } catch (e) {
+    toast('导出失败: ' + e.message);
+  }
+}
+
+function toast(msg) {
+  const el = document.createElement('div');
+  el.className = 'toast';
+  el.textContent = msg;
+  document.body.appendChild(el);
+  setTimeout(() => el.remove(), 2500);
+}
+
+// ==================== 弹窗功能（测试版3 新增） ====================
+
+function openPopup(nodeName) {
+  popupNode = nodeName;
+  popupRtBuffer = [];
+  
+  // 销毁旧图表
+  if (popupRtChart) { popupRtChart.destroy(); popupRtChart = null; }
+  if (popupHistChart) { popupHistChart.destroy(); popupHistChart = null; }
+  
+  // 重建实时图画布
+  const rtWrap = document.getElementById('popupRtWrap');
+  let rtCanvas = document.getElementById('popupRtChart');
+  if (rtCanvas) rtCanvas.remove();
+  rtCanvas = document.createElement('canvas');
+  rtCanvas.id = 'popupRtChart';
+  rtWrap.appendChild(rtCanvas);
+  
+  // 重建历史图画布
+  const histWrap = document.getElementById('popupHistWrap');
+  let histCanvas = document.getElementById('popupHistChart');
+  if (histCanvas) histCanvas.remove();
+  histCanvas = document.createElement('canvas');
+  histCanvas.id = 'popupHistChart';
+  histWrap.appendChild(histCanvas);
+  
+  // 初始化空实时图
+  const ctx = rtCanvas.getContext('2d');
+  const cat = nodeName.startsWith('FIT') ? 'FIT' : nodeName.startsWith('FIQ') ? 'FIQ' : 'IIAS';
+  const unit = cat === 'FIT' ? 'kg/h' : cat === 'FIQ' ? 'kg' : 'A';
+  popupRtChart = makeChart(ctx, nodeName, unit, []);
+  
+  // 设置标题
+  document.getElementById('popupTitle').textContent = nodeName;
+  
+  // 初始化时间（结束=当前，开始=1小时前）
+  const now = new Date();
+  document.getElementById('popupEndTime').value = toLocalISO(now);
+  document.getElementById('popupStartTime').value = toLocalISO(new Date(now - 3600000));
+  
+  // 显示弹窗
+  document.getElementById('popupOverlay').classList.add('open');
+}
+
+function closePopup() {
+  popupNode = null;
+  popupRtBuffer = [];
+  popupHistData = null;
+  if (popupRtChart) { popupRtChart.destroy(); popupRtChart = null; }
+  if (popupHistChart) { popupHistChart.destroy(); popupHistChart = null; }
+  document.getElementById('popupOverlay').classList.remove('open');
+}
+
+function exportPopupExcel() {
+  if (!popupNode || !popupHistData) { toast('请先查询历史数据'); return; }
+  const series = popupHistData.series || [];
+  if (series.length === 0 || !series[0].points || series[0].points.length === 0) {
+    toast('历史数据为空');
+    return;
+  }
+  const cat = popupNode.startsWith('FIT') ? 'FIT' : popupNode.startsWith('FIQ') ? 'FIQ' : 'IIAS';
+  const unit = cat === 'FIT' ? 'kg/h' : cat === 'FIQ' ? 'kg' : 'A';
+  const BOM = '\uFEFF';
+  const header = `时间,${popupNode} (${unit})`;
+  const pad = n => String(n).padStart(2, '0');
+  const rows = series[0].points.map(p => {
+    const d = new Date(p.timestamp);
+    const ts = `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+    return `="${ts}",${p.value !== null ? p.value.toFixed(2) : ''}`;
+  });
+  const csv = BOM + header + '\n' + rows.join('\n');
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  const st = document.getElementById('popupStartTime').value || '';
+  const et = document.getElementById('popupEndTime').value || '';
+  a.download = `${popupNode}_${st.replace(/:/g,'')}_${et.replace(/:/g,'')}.csv`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+  toast(`已导出 ${rows.length} 条历史数据`);
+}
+
+function updatePopupRtChart() {
+  if (!popupRtChart || popupRtBuffer.length === 0) return;
+  const cat = popupNode.startsWith('FIT') ? 'FIT' : popupNode.startsWith('FIQ') ? 'FIQ' : 'IIAS';
+  const unit = cat === 'FIT' ? 'kg/h' : cat === 'FIQ' ? 'kg' : 'A';
+  popupRtChart.data.datasets[0].data = popupRtBuffer.map(p => ({ x: p.timestamp.getTime(), y: p.value }));
+  popupRtChart.update('none');
+}
+
+function makeChart(ctx, label, unit, dataPoints) {
+  return new Chart(ctx, {
+    type: 'line',
+    data: {
+      datasets: [{
+        label: label + ' (' + unit + ')',
+        data: dataPoints,
+        borderColor: '#58a6ff',
+        backgroundColor: '#58a6ff20',
+        borderWidth: 1.5,
+        pointRadius: 0,
+        tension: 0.1,
+      }]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { labels: { color: '#8b949e', usePointStyle: true, boxWidth: 8, padding: 8 } },
+        tooltip: {
+          callbacks: {
+            title: items => items.length ? new Date(items[0].parsed.x).toLocaleString('zh-CN') : '',
+            label: ctx => label + ': ' + Number(ctx.parsed.y).toFixed(2) + ' ' + unit,
+          }
+        }
+      },
+      scales: {
+        x: {
+          type: 'linear',
+          ticks: { color: '#8b949e', maxTicksLimit: 10, callback: v => {
+            const d = new Date(v);
+            const pad = n => String(n).padStart(2, '0');
+            return pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds());
+          }},
+          grid: { color: '#21262d' }
+        },
+        y: {
+          ticks: { color: '#8b949e', callback: v => Number(v).toFixed(2) },
+          grid: { color: '#21262d' }
+        }
+      }
+    }
+  });
+}
+
+async function queryPopupHistory() {
+  if (!popupNode) return;
+  
+  const btn = document.getElementById('popupBtnQuery');
+  btn.disabled = true;
+  btn.textContent = '查询中...';
+  
+  const body = {
+    node_ids: ['ns=1;s=' + popupNode],
+    start_time: document.getElementById('popupStartTime').value + ':00',
+    end_time: document.getElementById('popupEndTime').value + ':00',
+    interval_seconds: 0  // 全量原始数据，无采样
+  };
+  
+  try {
+    const resp = await fetch(BASE + '/api/v1/history/query', {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)
+    });
+    const data = await resp.json();
+    popupHistData = data;  // 保存用于导出
+    
+    // 销毁旧图表并重建 canvas
+    if (popupHistChart) { popupHistChart.destroy(); popupHistChart = null; }
+    const histWrap = document.getElementById('popupHistWrap');
+    let histCanvas = document.getElementById('popupHistChart');
+    if (histCanvas) histCanvas.remove();
+    histCanvas = document.createElement('canvas');
+    histCanvas.id = 'popupHistChart';
+    histWrap.appendChild(histCanvas);
+    
+    const ctx = histCanvas.getContext('2d');
+    const cat = popupNode.startsWith('FIT') ? 'FIT' : popupNode.startsWith('FIQ') ? 'FIQ' : 'IIAS';
+    const unit = cat === 'FIT' ? 'kg/h' : cat === 'FIQ' ? 'kg' : 'A';
+    
+    const series = data.series || [];
+    const points = series.length > 0 ? (series[0].points || []).map(p => ({
+      x: new Date(p.timestamp).getTime(),
+      y: p.value
+    })) : [];
+    
+    popupHistChart = makeChart(ctx, popupNode, unit, points);
+    toast(`历史查询完成：${points.length} 个数据点`);
+  } catch (e) {
+    toast('历史查询失败: ' + e.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '🔍 查询';
+  }
+}
+// ==================== 弹窗功能 END ====================
+
+// ==================== 实时卡片筛选（测试版2 新增，测试版4 新增 IIAS 分组） ====================
+const CARD_GROUPS = [
+  { name: 'FIT 瞬时流量', color: '#3fb950', nodes: ALL_NODES_FIT },
+  { name: 'FIQ 累计流量', color: '#d29922', nodes: ALL_NODES_FIQ },
+  { name: 'IIAS 搅拌电机电流', color: '#58a6ff', nodes: ALL_NODES_IIAS },
+];
+let cardStatusFilter = 'all'; // 'all' | 'good' | 'bad'
+
+function cardNodeEl(n) { return document.querySelector(`[data-card-node="${n}"]`); }
+function cardNodeCb(n) { const el = cardNodeEl(n); return el ? el.querySelector('input') : null; }
+
+function toggleCardDropdown() {
+  const panel = document.getElementById('cardCheckboxes');
+  panel.classList.toggle('open');
+  if (panel.classList.contains('open')) {
+    document.getElementById('cardSearch').value = '';
+    cardFilterNodes('');
+    setTimeout(() => document.addEventListener('click', closeCardOutside, { once: true }), 10);
+  }
+}
+function closeCardOutside(e) {
+  const dd = document.getElementById('cardDropdown');
+  if (!dd.contains(e.target)) {
+    document.getElementById('cardCheckboxes').classList.remove('open');
+  } else {
+    document.addEventListener('click', closeCardOutside, { once: true });
+  }
+}
+
+function renderCardCheckboxes() {
+  const container = document.getElementById('cardGroups');
+  let html = '';
+  for (const g of CARD_GROUPS) {
+    html += `<div class="node-group" data-card-group="${g.name}">
+      <div class="node-group-header">
+        <span style="color:${g.color}">● ${g.name}</span>
+        <span class="grp-cnt" id="cardcnt_${g.name}"></span>
+      </div>
+      <div class="node-group-items">`;
+    for (const n of g.nodes) {
+      html += `<label data-card-node="${n}" data-card-group="${g.name}"><input type="checkbox" value="${n}" onchange="cardToggleCheck(this)" style="accent-color:${g.color}" checked><span style="color:${g.color}">${n}</span></label>`;
+    }
+    html += '</div></div>';
+  }
+  container.innerHTML = html;
+  cardUpdateLabel();
+}
+
+function cardToggleCheck(cb) {
+  const lbl = cardNodeEl(cb.value);
+  if (lbl) {
+    if (cb.checked) lbl.classList.add('checked');
+    else lbl.classList.remove('checked');
+  }
+  cardUpdateLabel();
+  filterCards();
+}
+
+function cardSelectAll(state) {
+  const all = [...ALL_NODES_FIT, ...ALL_NODES_FIQ];
+  all.forEach(n => {
+    const cb = cardNodeCb(n);
+    if (cb) { cb.checked = state; cardToggleCheck(cb); }
+  });
+}
+
+function cardSelectAllVisible(state) {
+  if (!document.getElementById('cardSearch').value.trim()) return;
+  const visibleLabels = document.querySelectorAll('#cardGroups label:not(.node-group-hidden)');
+  visibleLabels.forEach(lbl => {
+    const cb = lbl.querySelector('input');
+    if (cb) { cb.checked = state; cardToggleCheck(cb); }
+  });
+}
+
+function cardFilterNodes(query) {
+  const q = query.trim().toLowerCase();
+  for (const g of CARD_GROUPS) {
+    let visibleCount = 0;
+    for (const n of g.nodes) {
+      const lbl = cardNodeEl(n);
+      if (!lbl) continue;
+      const match = !q || n.toLowerCase().includes(q);
+      lbl.classList.toggle('node-group-hidden', !match);
+      if (match) visibleCount++;
+    }
+    const cntEl = document.getElementById('cardcnt_' + g.name);
+    if (cntEl) cntEl.textContent = q ? `${visibleCount}/${g.nodes.length}` : '';
+    const grpEl = document.querySelector(`[data-card-group="${g.name}"].node-group`);
+    if (grpEl) grpEl.style.display = visibleCount === 0 ? 'none' : '';
+  }
+}
+
+function cardUpdateLabel() {
+  const cbs = document.querySelectorAll('#cardGroups input:checked');
+  const n = cbs.length;
+  const total = ALL_NODES_FIT.length + ALL_NODES_FIQ.length + ALL_NODES_IIAS.length;
+  const badge = document.getElementById('cardSelectedBadge');
+  const label = document.getElementById('cardDropdownLabel');
+  if (n === 0) { label.textContent = '未选择位号'; badge.style.display = 'none'; }
+  else if (n === total) { label.textContent = '全部位号'; badge.textContent = n; badge.style.display = ''; }
+  else { label.textContent = '已选 ' + n + ' 个位号'; badge.textContent = n; badge.style.display = ''; }
+}
+
+function cardSetStatusFilter(status) {
+  cardStatusFilter = status;
+  document.getElementById('cardStatusAllBtn').className = 'dd-status-btn' + (status === 'all' ? ' active-all' : '');
+  document.getElementById('cardStatusGoodBtn').className = 'dd-status-btn' + (status === 'good' ? ' active-good' : '');
+  document.getElementById('cardStatusBadBtn').className = 'dd-status-btn' + (status === 'bad' ? ' active-bad' : '');
+  filterCards();
+}
+
+function filterCards() {
+  const cbs = document.querySelectorAll('#cardGroups input:checked');
+  const selected = new Set(Array.from(cbs).map(c => c.value));
+  const cards = document.querySelectorAll('#realtimeCards .card');
+  cards.forEach(c => {
+    const nodeName = c.getAttribute('data-card-node') || '';
+    // checkbox 筛选
+    if (!selected.has(nodeName)) { c.classList.add('card-hidden'); return; }
+    // 状态筛选（仅 FIT 卡片有 Good/Bad，FIQ 不受影响）
+    if (cardStatusFilter !== 'all') {
+      const metaEl = c.querySelector('.meta');
+      const metaText = metaEl ? metaEl.textContent : '';
+      const isGood = metaText.includes('Good');
+      const isBad = metaText.includes('Bad');
+      if (cardStatusFilter === 'good' && !isGood) { c.classList.add('card-hidden'); return; }
+      if (cardStatusFilter === 'bad' && !isBad) { c.classList.add('card-hidden'); return; }
+    }
+    c.classList.remove('card-hidden');
+  });
+}
+// ==================== 卡片筛选 END ====================
+
+// 初始化
+renderCheckboxes();
+renderCardCheckboxes();
+// 防重叠轮询：poll 跑完再等 500ms 才启动下一次
+let _pollTimer = null;
+async function startPollLoop() {
+  try { await pollRealtime(); } catch (_) {}
+  _pollTimer = setTimeout(startPollLoop, 500);
+}
+startPollLoop();
+</script>
+</body>
+</html>

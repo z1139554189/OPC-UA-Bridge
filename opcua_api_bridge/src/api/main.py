@@ -85,6 +85,16 @@ async def lifespan(app: FastAPI):
             "FIT_05R304F01.ERR","FIT_05R305F01.ERR","FIT_05R306F01.ERR",
             "FIT_05R307F01.ERR","FIT_05R308F01.ERR","FIT_05R309F01.ERR",
             "FIT_05R310F01.ERR",
+            # 搅拌电机电流 IIAS（磺化釜 05A102~05A111，量程 0-50A）
+            "IIAS_05A102.PV","IIAS_05A103.PV","IIAS_05A104.PV",
+            "IIAS_05A105.PV","IIAS_05A106.PV","IIAS_05A107.PV",
+            "IIAS_05A108.PV","IIAS_05A109.PV","IIAS_05A110.PV",
+            "IIAS_05A111.PV",
+            # 搅拌电机电流故障 ERR（磺化釜 05A102~05A111）
+            "IIAS_05A102.ERR","IIAS_05A103.ERR","IIAS_05A104.ERR",
+            "IIAS_05A105.ERR","IIAS_05A106.ERR","IIAS_05A107.ERR",
+            "IIAS_05A108.ERR","IIAS_05A109.ERR","IIAS_05A110.ERR",
+            "IIAS_05A111.ERR",
         ]
     ]
     opcua_client.add_nodes(_DEFAULT_NODE_IDS)
@@ -326,6 +336,14 @@ async def dashboard_test3():
     import os
     test3_path = os.path.join(os.path.dirname(__file__), "..", "..", "dashboard_test3.html")
     return FileResponse(test3_path)
+
+@app.get("/dashboard_test4", tags=["可视化"])
+async def dashboard_test4():
+    """OPC UA 可视化看板（测试版4 — 新增 IIAS 搅拌电机电流卡片）"""
+    from fastapi.responses import FileResponse
+    import os
+    test4_path = os.path.join(os.path.dirname(__file__), "..", "..", "dashboard_test4.html")
+    return FileResponse(test4_path)
 
 # Prometheus 指标端点
 @app.get("/metrics", tags=["监控"])

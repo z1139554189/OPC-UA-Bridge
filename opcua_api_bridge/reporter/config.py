@@ -41,6 +41,28 @@ REPORT_CONFIG = {
         "ns=1;s=FIT_05R308F01.ERR",
         "ns=1;s=FIT_05R309F01.ERR",
         "ns=1;s=FIT_05R310F01.ERR",
+        # 搅拌电机电流 IIAS（磺化釜 05A102~05A111，量程 0-50A）
+        "ns=1;s=IIAS_05A102.PV",
+        "ns=1;s=IIAS_05A103.PV",
+        "ns=1;s=IIAS_05A104.PV",
+        "ns=1;s=IIAS_05A105.PV",
+        "ns=1;s=IIAS_05A106.PV",
+        "ns=1;s=IIAS_05A107.PV",
+        "ns=1;s=IIAS_05A108.PV",
+        "ns=1;s=IIAS_05A109.PV",
+        "ns=1;s=IIAS_05A110.PV",
+        "ns=1;s=IIAS_05A111.PV",
+        # 搅拌电机电流故障 ERR（磺化釜 05A102~05A111）
+        "ns=1;s=IIAS_05A102.ERR",
+        "ns=1;s=IIAS_05A103.ERR",
+        "ns=1;s=IIAS_05A104.ERR",
+        "ns=1;s=IIAS_05A105.ERR",
+        "ns=1;s=IIAS_05A106.ERR",
+        "ns=1;s=IIAS_05A107.ERR",
+        "ns=1;s=IIAS_05A108.ERR",
+        "ns=1;s=IIAS_05A109.ERR",
+        "ns=1;s=IIAS_05A110.ERR",
+        "ns=1;s=IIAS_05A111.ERR",
     ],
 
     # ── 定时调度间隔（分钟） ─────────────────────
