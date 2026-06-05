@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>OPC UA Dashboard (V1.1)</title>
+<title>OPC UA Dashboard (V1.2)</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.8/dist/chart.umd.min.js"></script>
 <style>
 :root { --bg: #0d1117; --card: #161b22; --border: #30363d; --text: #c9d1d9; --text2: #8b949e; --accent: #58a6ff; --green: #3fb950; --red: #f85149; --orange: #d29922; }
@@ -93,7 +93,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; b
 <body>
 
 <div class="header">
-  <h1>OPC UA Bridge Dashboard <span style="font-size:12px;color:var(--green);font-weight:normal;background:#1a2a1a;border-radius:4px;padding:2px 8px;margin-left:8px">V1.1</span></h1>
+  <h1>OPC UA Bridge Dashboard <span style="font-size:12px;color:var(--green);font-weight:normal;background:#1a2a1a;border-radius:4px;padding:2px 8px;margin-left:8px">V1.2</span></h1>
   <span class="status" id="connStatus">连接中...</span>
 </div>
 
@@ -239,9 +239,12 @@ const BASE = window.location.origin;
 const ALL_NODES_FIT = ['FIT_05R301F01.PV','FIT_05R302F01.PV','FIT_05R303F01.PV','FIT_05R304F01.PV','FIT_05R305F01.PV','FIT_05R306F01.PV','FIT_05R307F01.PV','FIT_05R308F01.PV','FIT_05R309F01.PV','FIT_05R310F01.PV'];
 const ALL_NODES_FIQ = ['FIQ_05R301F01.OUT','FIQ_05R302F01.OUT','FIQ_05R303F01.OUT','FIQ_05R304F01.OUT','FIQ_05R305F01.OUT','FIQ_05R306F01.OUT','FIQ_05R307F01.OUT','FIQ_05R308F01.OUT','FIQ_05R309F01.OUT','FIQ_05R310F01.OUT'];
 const ALL_NODES_ERR = ['FIT_05R301F01.ERR','FIT_05R302F01.ERR','FIT_05R303F01.ERR','FIT_05R304F01.ERR','FIT_05R305F01.ERR','FIT_05R306F01.ERR','FIT_05R307F01.ERR','FIT_05R308F01.ERR','FIT_05R309F01.ERR','FIT_05R310F01.ERR'];
-const ALL_NODES = [...ALL_NODES_FIT, ...ALL_NODES_FIQ];
-// 批量查询包含 ERR 节点（用于 FIT 卡片状态显示），但不单独渲染 ERR 卡片
-const ALL_BATCH_NODES = [...ALL_NODES, ...ALL_NODES_ERR];
+// IIAS 搅拌电机电流节点（磺化釜 05A102~05A111，量程 0-50A）
+const ALL_NODES_IIAS = ['IIAS_05A102.PV','IIAS_05A103.PV','IIAS_05A104.PV','IIAS_05A105.PV','IIAS_05A106.PV','IIAS_05A107.PV','IIAS_05A108.PV','IIAS_05A109.PV','IIAS_05A110.PV','IIAS_05A111.PV'];
+const ALL_NODES_IIAS_ERR = ['IIAS_05A102.ERR','IIAS_05A103.ERR','IIAS_05A104.ERR','IIAS_05A105.ERR','IIAS_05A106.ERR','IIAS_05A107.ERR','IIAS_05A108.ERR','IIAS_05A109.ERR','IIAS_05A110.ERR','IIAS_05A111.ERR'];
+const ALL_NODES = [...ALL_NODES_FIT, ...ALL_NODES_FIQ, ...ALL_NODES_IIAS];
+// 批量查询包含 ERR 节点（用于卡片状态显示），但不单独渲染 ERR 卡片
+const ALL_BATCH_NODES = [...ALL_NODES, ...ALL_NODES_ERR, ...ALL_NODES_IIAS_ERR];
 
 let chart = null;
 let lastQueryData = null;
@@ -270,6 +273,8 @@ const NODE_GROUPS = [
   { name: 'FIT 瞬时流量', color: '#3fb950', nodes: ALL_NODES_FIT },
   { name: 'FIQ 累计流量', color: '#d29922', nodes: ALL_NODES_FIQ },
   { name: 'ERR 传感器状态', color: '#f85149', nodes: ALL_NODES_ERR },
+  { name: 'IIAS 搅拌电机电流', color: '#58a6ff', nodes: ALL_NODES_IIAS },
+  { name: 'IIAS ERR 电流故障', color: '#f85149', nodes: ALL_NODES_IIAS_ERR },
 ];
 
 // 用 data-node 属性存位号名，规避 id 里 '.' 在 querySelector 的歧义
@@ -331,7 +336,7 @@ function toggleCheck(cb) {
 
 // 全选 / 清空（对所有项操作）
 function selectAll(state) {
-  const all = [...ALL_NODES_FIT, ...ALL_NODES_FIQ, ...ALL_NODES_ERR];
+  const all = [...ALL_NODES_FIT, ...ALL_NODES_FIQ, ...ALL_NODES_ERR, ...ALL_NODES_IIAS, ...ALL_NODES_IIAS_ERR];
   all.forEach(n => {
     const cb = nodeCb(n);
     if (cb) { cb.checked = state; toggleCheck(cb); }
@@ -435,7 +440,7 @@ function renderCards(results) {
   const map = {};
   for (const r of results) map[r.node_id] = r;
   
-  // 建立 ERR 查询映射：FIT_05R3xxF01.ERR 的值
+  // 建立 FIT ERR 查询映射：FIT_05R3xxF01.ERR 的值
   const errVals = {};
   for (const en of ALL_NODES_ERR) {
     const r = map['ns=1;s=' + en];
@@ -452,6 +457,17 @@ function renderCards(results) {
     const errNode = fiqNode.replace('FIQ_', 'FIT_').replace('.OUT', '.ERR');
     return errVals[errNode];
   }
+  // 建立 IIAS ERR 查询映射：IIAS_05Axxx.ERR 的值
+  const iiasErrVals = {};
+  for (const en of ALL_NODES_IIAS_ERR) {
+    const r = map['ns=1;s=' + en];
+    iiasErrVals[en] = r && r.value !== null ? Number(r.value) : null;
+  }
+  // IIAS 节点关联 IIAS ERR：IIAS_05A102.PV → IIAS_05A102.ERR
+  function getErrForIias(iiasPvNode) {
+    const errNode = iiasPvNode.replace('.PV', '.ERR');
+    return iiasErrVals[errNode];
+  }
   
   let html = '';
   for (const n of ALL_NODES) {
@@ -459,16 +475,16 @@ function renderCards(results) {
     const r = map[fullId];
     const val = r && r.value !== null ? Number(r.value).toFixed(2) : '--';
     const qual = r ? (r.quality || '--') : '--';
-    const cat = n.startsWith('FIT') ? 'FIT' : 'FIQ';
-    const unit = cat === 'FIT' ? 'kg/h' : 'kg';
+    let cat, unit, errVal;
+    if (n.startsWith('FIT')) { cat = 'FIT'; unit = 'kg/h'; errVal = getErr(n); }
+    else if (n.startsWith('FIQ')) { cat = 'FIQ'; unit = 'kg'; errVal = getErrForFiq(n); }
+    else { cat = 'IIAS'; unit = 'A'; errVal = getErrForIias(n); }
     
-    // meta 行统一用 ERR 判断 Good/Bad（FIT 和 FIQ 一致逻辑）
-    let metaHtml;
-    const errVal = cat === 'FIT' ? getErr(n) : getErrForFiq(n);
+    // meta 行统一用 ERR 判断 Good/Bad
     const isGood = (qual === 'Good' && errVal === 0);
     const statusText = isGood ? 'Good' : 'Bad';
     const color = isGood ? '#3fb950' : '#f85149';
-    metaHtml = `<span style="color:${color}">${statusText}</span> · ${cat}`;
+    const metaHtml = `<span style="color:${color}">${statusText}</span> · ${cat}`;
     
     const isErr = qual !== 'Good' || (errVal !== null && errVal !== 0);
     
@@ -650,8 +666,8 @@ function openPopup(nodeName) {
   
   // 初始化空实时图
   const ctx = rtCanvas.getContext('2d');
-  const cat = nodeName.startsWith('FIT') ? 'FIT' : 'FIQ';
-  const unit = cat === 'FIT' ? 'kg/h' : 'kg';
+  const cat = nodeName.startsWith('FIT') ? 'FIT' : nodeName.startsWith('FIQ') ? 'FIQ' : 'IIAS';
+  const unit = cat === 'FIT' ? 'kg/h' : cat === 'FIQ' ? 'kg' : 'A';
   popupRtChart = makeChart(ctx, nodeName, unit, []);
   
   // 设置标题
@@ -682,8 +698,8 @@ function exportPopupExcel() {
     toast('历史数据为空');
     return;
   }
-  const cat = popupNode.startsWith('FIT') ? 'FIT' : 'FIQ';
-  const unit = cat === 'FIT' ? 'kg/h' : 'kg';
+  const cat = popupNode.startsWith('FIT') ? 'FIT' : popupNode.startsWith('FIQ') ? 'FIQ' : 'IIAS';
+  const unit = cat === 'FIT' ? 'kg/h' : cat === 'FIQ' ? 'kg' : 'A';
   const BOM = '\uFEFF';
   const header = `时间,${popupNode} (${unit})`;
   const pad = n => String(n).padStart(2, '0');
@@ -709,8 +725,8 @@ function exportPopupExcel() {
 
 function updatePopupRtChart() {
   if (!popupRtChart || popupRtBuffer.length === 0) return;
-  const cat = popupNode.startsWith('FIT') ? 'FIT' : 'FIQ';
-  const unit = cat === 'FIT' ? 'kg/h' : 'kg';
+  const cat = popupNode.startsWith('FIT') ? 'FIT' : popupNode.startsWith('FIQ') ? 'FIQ' : 'IIAS';
+  const unit = cat === 'FIT' ? 'kg/h' : cat === 'FIQ' ? 'kg' : 'A';
   popupRtChart.data.datasets[0].data = popupRtBuffer.map(p => ({ x: p.timestamp.getTime(), y: p.value }));
   popupRtChart.update('none');
 }
@@ -792,8 +808,8 @@ async function queryPopupHistory() {
     histWrap.appendChild(histCanvas);
     
     const ctx = histCanvas.getContext('2d');
-    const cat = popupNode.startsWith('FIT') ? 'FIT' : 'FIQ';
-    const unit = cat === 'FIT' ? 'kg/h' : 'kg';
+    const cat = popupNode.startsWith('FIT') ? 'FIT' : popupNode.startsWith('FIQ') ? 'FIQ' : 'IIAS';
+    const unit = cat === 'FIT' ? 'kg/h' : cat === 'FIQ' ? 'kg' : 'A';
     
     const series = data.series || [];
     const points = series.length > 0 ? (series[0].points || []).map(p => ({
@@ -812,10 +828,11 @@ async function queryPopupHistory() {
 }
 // ==================== 弹窗功能 END ====================
 
-// ==================== 实时卡片筛选（测试版2 新增，仅 FIT/FIQ，无 ERR） ====================
+// ==================== 实时卡片筛选（测试版2 新增，V1.2 新增 IIAS 分组） ====================
 const CARD_GROUPS = [
   { name: 'FIT 瞬时流量', color: '#3fb950', nodes: ALL_NODES_FIT },
   { name: 'FIQ 累计流量', color: '#d29922', nodes: ALL_NODES_FIQ },
+  { name: 'IIAS 搅拌电机电流', color: '#58a6ff', nodes: ALL_NODES_IIAS },
 ];
 let cardStatusFilter = 'all'; // 'all' | 'good' | 'bad'
 
@@ -870,7 +887,7 @@ function cardToggleCheck(cb) {
 }
 
 function cardSelectAll(state) {
-  const all = [...ALL_NODES_FIT, ...ALL_NODES_FIQ];
+  const all = [...ALL_NODES_FIT, ...ALL_NODES_FIQ, ...ALL_NODES_IIAS];
   all.forEach(n => {
     const cb = cardNodeCb(n);
     if (cb) { cb.checked = state; cardToggleCheck(cb); }
@@ -907,7 +924,7 @@ function cardFilterNodes(query) {
 function cardUpdateLabel() {
   const cbs = document.querySelectorAll('#cardGroups input:checked');
   const n = cbs.length;
-  const total = ALL_NODES_FIT.length + ALL_NODES_FIQ.length;
+  const total = ALL_NODES_FIT.length + ALL_NODES_FIQ.length + ALL_NODES_IIAS.length;
   const badge = document.getElementById('cardSelectedBadge');
   const label = document.getElementById('cardDropdownLabel');
   if (n === 0) { label.textContent = '未选择位号'; badge.style.display = 'none'; }
