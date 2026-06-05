@@ -118,7 +118,9 @@
 | 弹窗 Excel 导出 | 导出弹窗中筛选时间范围的历史数据（非实时 buffer），CSV BOM UTF-8，文件名含时间范围 |
 | 版本 | **`dashboard.html` = V1.1 正式版**（2026-06-02 10:18 发布） |
 | 测试版4 | `dashboard_test4.html`（2026-06-05，新增 IIAS 搅拌电机电流卡片） |
+| 测试版5 | `dashboard_test5.html`（V2算法: CUSUM+EWMA+峭度, 自适应基线，2026-06-05） |
 | 归档 | `dashboard_test.html`（v1）、`dashboard_test2.html`（v2）、`dashboard_test3.html`（v3） |
+| 电机健康度 API | `GET /api/v1/motor-health/{node_name}` — 5维度健康指标 + 30天趋势 + 预警建议 |
 | 同步路径 | Bridge 修改后需同步到 `~/.node-red/dashboard.html`（Node-RED 独立副本） |
 
 ### SQLite 历史库
@@ -256,3 +258,32 @@ find-skills、python-backend、fastapi、docker-compose、node-red-manager
 ---
 
 _后续增量记录在 `memory/YYYY-MM-DD.md`，长期经验沉淀在本文件。_
+
+## 第九部分：电机健康度 V2.1 (2026-06-05)
+
+### 架构
+- 服务运行：`D:\opcua_venv\Scripts\python.exe -m uvicorn`，端口 8000
+- 后台启动方式：PowerShell `Start-Process` + `-WindowStyle Hidden`（NSSM 不可用）
+- 注意：OPC UA 客户端连接需要 ~10 秒，Start-Job 被安全策略阻止
+
+### 停机数据过滤
+- 自动分界法：`_find_stopped_threshold()` 基于数据双峰分布，median × 0.25
+- 连续性验证：连续 ≥10 点低于阈值才确认停机（防毛刺误判）
+- 过滤后计算基线 + 所有 5 维度 + 趋势图
+
+### 实时电流
+- 调用 `opcua_client.read_value(full_id)` 直接从 OPC UA 读取
+- 失败时 fallback 到历史库最新值
+
+### 威布尔寿命
+- 双参数模型，β=3.5（磨损失效），R_target=0.90
+- 失效阈值 = 基线 + 3σ（替代旧 1.3×基线）
+- 数据 < 7 天时返回 365（抗噪声保护）
+
+### 停机缓存冻结 (三层防护)
+- **问题**: 停机后 API 每 30s 轮询 → 30天滑动窗口数据变动 → EWMA/峭度跳动 → 评分乱跳
+- **L1 前端驱动停机 (主力)**: `mhMotorStopped` 跟踪实时数据, 停机时 `setInterval` 跳过 `loadMotorHealth()`, 完全不调用 API; 重启时自动恢复
+- **L2 后端双重检测**: `current_now < stopped_thr` (OPC UA) + 最近 20 个原始数据点全部 < stopped_thr (防 OPC UA 单次读不准)
+- **L3 后端缓存**: 模块级 `_mh_cache`, 停机 → `result = {...}` 赋值变量 → 写缓存 → `return result` (注意不能 `return {...}` 直接返回, 否则缓存写入成死代码)
+- **重启检测**: `live_current > stopped_thr × 3` → 自动清缓存
+- **关键教训**: 不要仅保护 score, detail 字段 (ewma_shift_sigmas, kurtosis_delta) 也需要冻结; 前端实时批量读比 API 单次 OPC UA 读更可靠
