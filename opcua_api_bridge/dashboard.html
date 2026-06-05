@@ -260,13 +260,13 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; b
 
 <script>
 // ==================== 登录鉴权 ====================
-const AUTH_USER = 'admin';
-const AUTH_PASS = 'Admin_00';
+var AUTH_USER = 'admin';
+var AUTH_PASS = 'Admin_00';
 
 function doLogin() {
-  const u = document.getElementById('loginUser').value.trim();
-  const p = document.getElementById('loginPass').value;
-  const err = document.getElementById('loginErr');
+  var u = document.getElementById('loginUser').value.trim();
+  var p = document.getElementById('loginPass').value;
+  var err = document.getElementById('loginErr');
   if (u === AUTH_USER && p === AUTH_PASS) {
     document.getElementById('loginOverlay').classList.add('hidden');
     err.textContent = '';
@@ -275,10 +275,13 @@ function doLogin() {
   }
 }
 
-document.addEventListener('DOMContentLoaded', () => {
-  const passEl = document.getElementById('loginPass');
+// 回车快捷登录
+document.addEventListener('DOMContentLoaded', function() {
+  var passEl = document.getElementById('loginPass');
   if (passEl) {
-    passEl.addEventListener('keydown', e => { if (e.key === 'Enter') doLogin(); });
+    passEl.addEventListener('keydown', function(e) {
+      if (e.key === 'Enter') { doLogin(); }
+    });
   }
 });
 // ==================== 登录鉴权结束 ====================
