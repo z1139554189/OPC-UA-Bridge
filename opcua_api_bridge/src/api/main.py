@@ -479,6 +479,8 @@ async def batch_history_export(req: BatchHistoryRequest):
             display = f"{display} (kg)"
         elif "FIT" in display.upper() and "ERR" not in display.upper():
             display = f"{display} (kg/h)"
+        elif "IIAS" in display.upper() and "ERR" not in display.upper():
+            display = f"{display} (A)"
         elif "ERR" in display.upper():
             display = f"{display} (0/1)"
         cell = ws.cell(row=1, column=col_idx, value=display)
