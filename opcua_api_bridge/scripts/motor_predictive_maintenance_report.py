@@ -132,8 +132,7 @@ def _ewma(values, lam=0.15):
 
 def _two_sided_cusum(values, target, std, k_factor=0.5, h_factor=5.0):
     """双侧 CUSUM 累积和检测 (ISO 20958 / Montgomery SPC)
-    
-    TU Wien 2024: CUSUM 对极小漂移 (<0.5σ) 检测能力优于 EWMA
+    触发后自动重置，防止长序列无限累积导致所有电机压到同一低分。
     """
     if not values or std < 1e-9:
         return [], [], 0.0, 1.0, [], []
@@ -146,12 +145,15 @@ def _two_sided_cusum(values, target, std, k_factor=0.5, h_factor=5.0):
         deviation = v - target
         cp = max(0, c_pos[-1] + deviation - k)
         cn = max(0, c_neg[-1] - deviation - k)
-        c_pos.append(cp)
-        c_neg.append(cn)
+        # 触发后重置，防止无限累积
         if cp > h:
             triggered_pos.append(i)
+            cp = 0.0
         if cn > h:
             triggered_neg.append(i)
+            cn = 0.0
+        c_pos.append(cp)
+        c_neg.append(cn)
         max_pos = max(max_pos, cp)
     return c_pos, c_neg, max_pos, h, triggered_pos, triggered_neg
 
@@ -324,20 +326,24 @@ def _score_cusum(cusum_max, h_value, triggered_count=0, data_points=0):
 
 
 def _score_volatility(recent_rolling_std, baseline_std):
-    """短期波动评分。波动降低（ratio<1）给满分100，波动增加按比例扣分。"""
+    """短期波动评分。ratio<1 表示波动降低（变好），但也给区分度；ratio>1 波动增加（变坏）按比例扣分。"""
     if baseline_std < 1e-9:
         return 50.0
     ratio = recent_rolling_std / baseline_std
-    if ratio <= 1.0:
-        return 100.0  # 波动未增大 → 满分
+    if ratio <= 0.5:
+        return 100.0
+    elif ratio < 0.8:
+        return round(100.0 - (ratio - 0.5) * 16.7, 1)   # 100 ~ 95
+    elif ratio <= 1.0:
+        return round(95.0 - (ratio - 0.8) * 25.0, 1)    # 95 ~ 90
     elif ratio < 1.3:
-        return round(100 - (ratio - 1.0) * 40, 1)   # 100~88
+        return round(90.0 - (ratio - 1.0) * 33.3, 1)    # 90 ~ 80
     elif ratio < 2.0:
-        return round(88 - (ratio - 1.3) * 70, 1)    # 88~39
+        return round(80.0 - (ratio - 1.3) * 58.6, 1)    # 80 ~ 39
     elif ratio < 3.0:
-        return round(39 - (ratio - 2.0) * 30, 1)    # 39~9
+        return round(39.0 - (ratio - 2.0) * 30.0, 1)    # 39 ~ 9
     else:
-        return max(5, round(9 - (ratio - 3.0) * 4, 1))
+        return max(5, round(9.0 - (ratio - 3.0) * 4.0, 1))
 
 
 def _score_ewma(ewma_end, baseline_mean, baseline_std):
@@ -440,7 +446,7 @@ def _generate_alerts_v2(dim_scores, cusum_triggered, ewma_shift_sigmas,
                 f"可能原因：轴承早期磨损、负载缓慢变化或绝缘渐进劣化。建议安排近期巡检。"
             ),
         })
-    if vol_ratio > 2.0:
+    if vol_ratio is not None and vol_ratio > 2.0:
         alerts.append({
             "level": "warning",
             "title": "电流波动异常增大",
@@ -604,6 +610,8 @@ def analyze_motor(node_id: str, all_data: list, now: datetime) -> dict:
         analysis_values = values_running
         baseline_source = f"全量数据（{len(baseline_values)} 点，基线不稳定）"
 
+    baseline_is_same = (baseline_values is analysis_values)
+
     # ── 自适应基线计算 ──
     baseline_sorted = sorted(baseline_values)
     bl_median, bl_std, bl_kurtosis = _compute_adaptive_baseline(baseline_sorted)
@@ -619,20 +627,26 @@ def analyze_motor(node_id: str, all_data: list, now: datetime) -> dict:
     )
     cusum_triggered = trig_pos + trig_neg
     cusum_score = _score_cusum(cusum_max, h_val, len(cusum_triggered), len(analysis_values))
-    if not data_sufficient:
+    if not data_sufficient or baseline_is_same:
+        # 基线未拆分或数据不足时，CUSUM 可能误报，限制最低分并给提示
         cusum_score = max(cusum_score, 40)
 
     # ── 2. 短期波动增幅 ──
-    window_size = max(10, min(100, len(analysis_values) // 10))
-    rolling_stds = []
-    for i in range(0, len(analysis_values) - window_size + 1, window_size // 2):
-        chunk = analysis_values[i:i + window_size]
-        if len(chunk) >= 5:
-            m = sum(chunk) / len(chunk)
-            rolling_stds.append(_pop_std(chunk, m))
-    recent_rolling_std = _median(sorted(rolling_stds[-6:])) if rolling_stds else bl_std
-    vol_ratio = recent_rolling_std / max(bl_std, 0.01)
-    vol_score = _score_volatility(recent_rolling_std, bl_std)
+    if baseline_is_same:
+        # 基线未拆分：近期波动与基线来自同一数据源，比较无意义
+        vol_score = None
+        vol_ratio = None
+    else:
+        window_size = max(10, min(100, len(analysis_values) // 10))
+        rolling_stds = []
+        for i in range(0, len(analysis_values) - window_size + 1, window_size // 2):
+            chunk = analysis_values[i:i + window_size]
+            if len(chunk) >= 5:
+                m = sum(chunk) / len(chunk)
+                rolling_stds.append(_pop_std(chunk, m))
+        recent_rolling_std = _median(sorted(rolling_stds[-6:])) if rolling_stds else bl_std
+        vol_ratio = recent_rolling_std / max(bl_std, 0.01)
+        vol_score = _score_volatility(recent_rolling_std, bl_std)
 
     # ── 3. EWMA 趋势偏移 ──
     ewma_values = _ewma(analysis_values, lam=0.15)
@@ -683,8 +697,14 @@ def analyze_motor(node_id: str, all_data: list, now: datetime) -> dict:
         "excursion": exc_score,
         "kurtosis": kurt_score,
     }
-    overall = sum(dim_scores[k] * SCORE_WEIGHTS[k] for k in SCORE_WEIGHTS)
-    if any(dim_scores[k] < 40 for k in SCORE_WEIGHTS):
+    # 有 None 的维度不参与加权，剩余权重重新归一化
+    valid_weights = {k: SCORE_WEIGHTS[k] for k in SCORE_WEIGHTS if dim_scores[k] is not None}
+    weight_sum = sum(valid_weights.values())
+    if weight_sum > 0:
+        overall = sum(dim_scores[k] * (valid_weights[k] / weight_sum) for k in valid_weights)
+    else:
+        overall = 50.0
+    if any(dim_scores[k] is not None and dim_scores[k] < 40 for k in SCORE_WEIGHTS):
         overall = min(overall, 60)
     overall = round(overall, 1)
 
@@ -840,7 +860,7 @@ def analyze_motor(node_id: str, all_data: list, now: datetime) -> dict:
         "cusum_triggered_count": len(cusum_triggered),
         "ewma_shift_sigmas": round(ewma_shift_sigmas, 2),
         "ewma_end": round(ewma_end, 2),
-        "vol_ratio": round(vol_ratio, 2),
+        "vol_ratio": round(vol_ratio, 2) if vol_ratio is not None else None,
         "kurt_delta": round(kurt_delta, 3),
         "drift_per_day": round(drift_per_day, 4),
         "alerts": alerts,
@@ -1034,7 +1054,7 @@ def generate_html_report(results: list, period_desc: str, generated_at: str,
             f'<td>{_health_bar(r["overall"])}</td>'
             f'<td><span class="badge" style="background:{r["risk_color"]}">{r["risk_label"]}</span></td>'
             f'<td style="color:{"#c62828" if ds["cusum"]<60 else "#333"}">{ds["cusum"]}</td>'
-            f'<td style="color:{"#c62828" if ds["volatility"]<60 else "#333"}">{ds["volatility"]}</td>'
+            f'<td style="color:{"#c62828" if (ds["volatility"] is not None and ds["volatility"]<60) else "#333"}">{ds["volatility"] if ds["volatility"] is not None else "—"}</td>'
             f'<td style="color:{"#c62828" if ds["ewma"]<60 else "#333"}">{ds["ewma"]}</td>'
             f'<td style="color:{"#c62828" if ds["excursion"]<60 else "#333"}">{ds["excursion"]}</td>'
             f'<td style="color:{"#c62828" if ds["kurtosis"]<60 else "#333"}">{ds["kurtosis"]}</td>'
@@ -1086,7 +1106,7 @@ def generate_html_report(results: list, period_desc: str, generated_at: str,
     <div class="wt">权重 30%</div>
   </div>
   <div class="score-item">
-    <div class="val" style="color:{'#c62828' if ds['volatility']<60 else '#2e7d32'}">{ds['volatility']}</div>
+    <div class="val" style="color:{'#c62828' if (ds['volatility'] is not None and ds['volatility']<60) else '#2e7d32'}">{ds['volatility'] if ds['volatility'] is not None else '—'}</div>
     <div class="key">波动增幅</div>
     <div class="wt">权重 25%</div>
   </div>
@@ -1129,7 +1149,7 @@ def generate_html_report(results: list, period_desc: str, generated_at: str,
 <tr><td>分析期峭度</td><td>{r['current_kurtosis']}</td><td>当前分布形态 — 高于基线表示冲击事件增多</td></tr>
 <tr><td>EWMA 终点</td><td>{r['ewma_end']} A</td><td>指数加权移动平均终值（λ=0.15）</td></tr>
 <tr><td>EWMA 偏移</td><td>{r['ewma_shift_sigmas']} σ</td><td>偏离基线的程度</td></tr>
-<tr><td>波动比</td><td>{r['vol_ratio']}×</td><td>短期滚动标准差 / 基线标准差</td></tr>
+<tr><td>波动比</td><td>{r['vol_ratio'] if r['vol_ratio'] is not None else '—'}×</td><td>短期滚动标准差 / 基线标准差</td></tr>
 <tr><td>峭度变化</td><td>Δ={r['kurt_delta']}</td><td>当前峭度与基线的差值</td></tr>
 <tr><td>退化速率</td><td>{r['drift_per_day']} A/天</td><td>EWMA 日均漂移量（用于寿命估计）</td></tr>
 <tr><td>累计运行时间</td><td>{r['cumulative_hours']} 小时</td><td>仅统计实际运行时段</td></tr>
