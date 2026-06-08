@@ -394,39 +394,40 @@ def _score_excursion(recent_excursion_rate, baseline_excursion_rate):
 
 
 def _score_kurtosis(current_kurtosis, baseline_kurtosis):
-    """峭度变化评分 — 只有峭度显著上升（冲击增多）才扣分。
-    峭度下降（分布变得更正态）是改善，不扣分，幅度越大加分越多。
-    用连续公式避免评分聚集在少数几个固定值。
+    """峭度变化评分 — 基于比值 (ratio = cur / bl)，而非绝对差值。
+
+    峭度是四阶距统计量，120K 数据点下 delta 轻松达到 ±50，
+    用绝对差值评分会导致分数全部压在 5 或 99 两端。
+    改用比值法后，1.5x 增长和 5x 增长有明确的分数梯度。
+
+    ratio < 1 → 峭度下降（分布变正态）→ 改善，加分
+    ratio > 1 → 峭度上升（厚尾加剧）  → 恶化，扣分
     """
-    if baseline_kurtosis is None:
-        baseline_kurtosis = 0.0
-    delta = current_kurtosis - baseline_kurtosis
+    if baseline_kurtosis is None or baseline_kurtosis < 1e-9:
+        baseline_kurtosis = 1.0
+    ratio = current_kurtosis / max(baseline_kurtosis, 1.0)
 
-    # ── 峭度下降或持平 → 加分 ──
-    if delta <= -2.0:
-        return round(min(99, 97 + abs(delta) * 0.5), 1)     # 97~99
-    if delta <= -1.0:
-        return round(95 + (abs(delta) - 1.0) * 2, 1)        # 95~97
-    if delta <= -0.5:
-        return round(92 + (abs(delta) - 0.5) * 6, 1)        # 92~95
-    if delta <= -0.2:
-        return round(88 + (abs(delta) - 0.2) * 13.3, 1)     # 88~92
-    if delta <= 0.0:
-        return round(85 + abs(delta) * 15, 1)                # 85~88
+    # ── 峭度下降 (ratio < 1) → 加分 ──
+    if ratio <= 0.2:
+        return 100.0                                           # 改善 >80%
+    elif ratio <= 0.5:
+        return round(95.0 + (0.5 - ratio) / 0.3 * 5.0, 1)    # 95~100
+    elif ratio <= 0.8:
+        return round(90.0 + (0.8 - ratio) / 0.3 * 5.0, 1)    # 90~95
+    elif ratio <= 1.0:
+        return round(85.0 + (1.0 - ratio) / 0.2 * 5.0, 1)    # 85~90
 
-    # ── 峭度上升 → 扣分 ──
-    if delta < 0.3:
-        return round(85 - delta * 45, 1)                     # 85~71.5
-    if delta < 0.8:
-        return round(71.5 - (delta - 0.3) * 50, 1)           # 71.5~46.5
-    if delta < 1.5:
-        return round(46.5 - (delta - 0.8) * 35, 1)           # 46.5~22
-    if delta < 3.0:
-        return round(22 - (delta - 1.5) * 8, 1)              # 22~10
+    # ── 峭度上升 (ratio > 1) → 扣分 ──
+    elif ratio <= 1.2:
+        return round(85.0 - (ratio - 1.0) / 0.2 * 5.0, 1)    # 80~85
+    elif ratio <= 1.5:
+        return round(80.0 - (ratio - 1.2) / 0.3 * 15.0, 1)   # 65~80
+    elif ratio <= 2.5:
+        return round(65.0 - (ratio - 1.5) / 1.0 * 25.0, 1)   # 40~65
+    elif ratio <= 5.0:
+        return round(40.0 - (ratio - 2.5) / 2.5 * 25.0, 1)   # 15~40
     else:
-        import math
-        log_delta = math.log1p(delta)
-        return round(max(5, 10 - log_delta * 3), 1)          # 最高10，对数衰减
+        return round(max(5.0, 15.0 - (ratio - 5.0) * 2.0), 1)  # 5~15
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
