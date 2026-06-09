@@ -259,7 +259,7 @@ class OPCUAClient:
         security_policy: Optional[str] = None,
         security_mode: Optional[str] = None,
         history_db_path: Optional[str] = None,
-        history_retention_days: int = 7,
+        history_retention_days: int = 365,
     ):
         self.endpoint = endpoint
         self.username = username or ""
