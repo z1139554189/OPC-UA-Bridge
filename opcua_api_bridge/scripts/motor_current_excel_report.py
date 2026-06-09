@@ -15,7 +15,6 @@ import argparse
 import sqlite3
 import os
 import sys
-from collections import Counter
 from datetime import datetime, timedelta
 
 # ── 必须先把项目根加到 sys.path，才能 import settings ─────────────────────────
@@ -33,68 +32,103 @@ except ImportError:
     print("❌ 缺少 openpyxl，请运行：pip install openpyxl")
     sys.exit(1)
 
-def _find_stopped_threshold(values, bin_width=0.5):
-    """自动发现停机/运行分界线 — 基于直方图谷底检测。
 
-    对双峰分布，找到两峰之间计数最少的桶（谷底）作为阈值。
-    当谷底区域极宽（>5A）时，改用两峰中点，避免将运行峰左尾误判为谷底。
-    对单峰分布（只有运行数据），返回保守阈值 5.0A。
-    与 motor_predictive_maintenance_report.py 逻辑保持一致。
+# ── 稳态数据提取 + 运行时长（与 motor_predictive_maintenance_report.py 一致）───
+
+STOP_CURRENT_A = 1.0
+START_CONSECUTIVE = 10
+SURGE_REMOVE = 50
+STOP_CONSECUTIVE = 10
+PRE_STOP_REMOVE = 70
+RUNTIME_START_N = 5
+RUNTIME_STOP_N = 5
+
+
+def extract_steady_segments(data_all):
+    """三阶段状态机提取稳态数据。规则与预测性维护报告完全一致。
+
+    停机→启动: 连续10点>1A, 启动点=第10个
+    浪涌剔除: 启动点后50点
+    稳态: 启动点+50 到 停机点-70
+    稳态→停机: 连续10点<1A, 停机点=第10个
     """
-    if not values:
-        return 0.0
+    STOPPED, STARTING, STEADY = 0, 1, 2
+    state = STOPPED
+    above_count = 0; below_count = 0; cnt_since_start = 0
+    steady_start_idx = None
+    steady_ranges = []
 
-    valid = [v for v in values if v is not None and v > 0.01]
-    if len(valid) < 50:
-        return 5.0
+    for i, d in enumerate(data_all):
+        v = d["value"]
+        if v is None: continue
+        if state == STOPPED:
+            if v > STOP_CURRENT_A:
+                above_count += 1
+                if above_count >= START_CONSECUTIVE:
+                    state = STARTING; cnt_since_start = 0; above_count = 0
+            else: above_count = 0
+        elif state == STARTING:
+            cnt_since_start += 1
+            if cnt_since_start >= SURGE_REMOVE:
+                state = STEADY; steady_start_idx = i + 1; below_count = 0
+        elif state == STEADY:
+            if v < STOP_CURRENT_A:
+                below_count += 1
+                if below_count >= STOP_CONSECUTIVE:
+                    steady_end_idx = i - PRE_STOP_REMOVE
+                    if steady_start_idx is not None and steady_end_idx >= steady_start_idx:
+                        steady_ranges.append((steady_start_idx, steady_end_idx))
+                    state = STOPPED; below_count = 0; steady_start_idx = None
+            else: below_count = 0
 
-    hist = Counter()
-    for v in valid:
-        b = round(v / bin_width) * bin_width
-        hist[b] += 1
+    if state == STEADY and steady_start_idx is not None:
+        steady_ranges.append((steady_start_idx, len(data_all) - 1))
 
-    sorted_bins = sorted(hist.keys())
-    if len(sorted_bins) < 3:
-        return 5.0
+    result = []
+    for start, end in steady_ranges:
+        for j in range(start, end + 1):
+            if j < len(data_all) and data_all[j]["value"] is not None:
+                result.append(data_all[j])
+    return result
 
-    # 识别两个峰
-    stopped_peak_bin, stopped_peak_cnt = None, 0
-    for b in sorted_bins:
-        if b < 2.0 and hist[b] > stopped_peak_cnt:
-            stopped_peak_cnt = hist[b]
-            stopped_peak_bin = b
 
-    running_peak_bin, running_peak_cnt = None, 0
-    for b in sorted_bins:
-        if b > 5.0 and hist[b] > running_peak_cnt:
-            running_peak_cnt = hist[b]
-            running_peak_bin = b
+def calc_runtime(data_all):
+    """计算累计运行时长。连续5点>1A开始计时, 连续5点<1A停止计时。"""
+    RUNNING, STOPPED = "running", "stopped"
+    state = STOPPED
+    above_count = 0; below_count = 0
+    run_start_ts = None
+    total_seconds = 0.0
 
-    if stopped_peak_bin is None or stopped_peak_cnt < len(valid) * 0.005:
-        return 5.0
-    if running_peak_bin is None:
-        return 0.5
+    for d in data_all:
+        v = d["value"]
+        if v is None: continue
+        try: ts = datetime.fromisoformat(d["timestamp"])
+        except (ValueError, TypeError): continue
 
-    valley_bins = [
-        (b, hist[b])
-        for b in sorted_bins
-        if stopped_peak_bin < b < running_peak_bin
-    ]
+        if state == STOPPED:
+            if v > STOP_CURRENT_A:
+                above_count += 1
+                if above_count >= RUNTIME_START_N:
+                    state = RUNNING; run_start_ts = ts; above_count = 0
+            else: above_count = 0
+        elif state == RUNNING:
+            if v < STOP_CURRENT_A:
+                below_count += 1
+                if below_count >= RUNTIME_STOP_N:
+                    state = STOPPED
+                    if run_start_ts is not None:
+                        total_seconds += max(0.0, (ts - run_start_ts).total_seconds())
+                    run_start_ts = None; below_count = 0
+            else: below_count = 0
 
-    if not valley_bins:
-        return round((stopped_peak_bin + running_peak_bin) / 2.0, 2)
+    if state == RUNNING and run_start_ts is not None:
+        try:
+            last_ts = datetime.fromisoformat(data_all[-1]["timestamp"])
+            total_seconds += max(0.0, (last_ts - run_start_ts).total_seconds())
+        except (ValueError, TypeError, IndexError): pass
 
-    valley_span = running_peak_bin - stopped_peak_bin
-    if valley_span > 5.0:
-        return round((stopped_peak_bin + running_peak_bin) / 2.0, 2)
-
-    valley_bin, valley_cnt = min(valley_bins, key=lambda x: x[1])
-
-    if (valley_bin - stopped_peak_bin < 1.0 or
-            running_peak_bin - valley_bin < 1.0):
-        return round((stopped_peak_bin + running_peak_bin) / 2.0, 2)
-
-    return round(valley_bin + bin_width, 2)
+    return round(total_seconds / 3600.0, 1)
 
 
 # ── 配置 ──────────────────────────────────────────────────────────────────────
@@ -173,9 +207,12 @@ def read_data(db, node_id, start_time, end_time_excl):
     return [{"timestamp": r[0], "value": r[1]} for r in cur.fetchall() if r[1] is not None]
 
 
-def compute_stats(data_running, data_all, stopped_threshold=None):
-    """计算运行统计（全量用于停机占比）
-    stopped_threshold: 动态停机阈值（A），会写入返回字典供报表使用
+def compute_stats(data_all, data_running):
+    """计算运行统计。
+
+    参数:
+      data_all:     全量数据（含停机），用于运行时长计算
+      data_running: 已提取的稳态运行数据（由 extract_steady_segments 产出）
     """
     total = len(data_all)
     running = len(data_running)
@@ -187,7 +224,6 @@ def compute_stats(data_running, data_all, stopped_threshold=None):
             "count": 0, "total": total,
             "avg": None, "max": None, "min": None, "std": None,
             "runtime_h": 0, "stop_pct": stop_pct, "run_pct": run_pct,
-            "stopped_threshold": stopped_threshold,
             "data_start": None, "data_end": None,
         }
 
@@ -198,33 +234,14 @@ def compute_stats(data_running, data_all, stopped_threshold=None):
     mn   = min(vals)
     std  = (sum((v - avg) ** 2 for v in vals) / n) ** 0.5
 
-    # 累计运行时长：按连续运行段
-    SEGMENT_GAP = 60  # 秒
-    cum_h = 0.0
-    seg_start = seg_last = None
-    for d in data_running:
-        try:
-            ts = datetime.fromisoformat(d["timestamp"])
-        except Exception:
-            continue
-        if seg_start is None:
-            seg_start = seg_last = ts
-        else:
-            gap = (ts - seg_last).total_seconds()
-            if gap > SEGMENT_GAP:
-                cum_h += (seg_last - seg_start).total_seconds() / 3600
-                seg_start = seg_last = ts
-            else:
-                seg_last = ts
-    if seg_start and seg_last:
-        cum_h += (seg_last - seg_start).total_seconds() / 3600
+    # 累计运行时长：规则二（宽松，连续5点>1A计时，连续5点<1A停时）
+    cum_h = calc_runtime(data_all)
 
     return {
         "count": n, "total": total,
         "avg": round(avg, 2), "max": round(mx, 2), "min": round(mn, 2), "std": round(std, 2),
-        "runtime_h": round(cum_h, 1),
+        "runtime_h": cum_h,
         "stop_pct": stop_pct, "run_pct": run_pct,
-        "stopped_threshold": stopped_threshold,
         "data_start": data_running[0]["timestamp"][:19],
         "data_end":   data_running[-1]["timestamp"][:19],
     }
@@ -336,7 +353,7 @@ def build_summary_sheet(wb, results, period_desc, generated_at):
     sub = ws["A2"]
     sub.value     = (
         f"生成时间：{generated_at}    数据来源：OPC UA 历史数据库    "
-        f"停机阈值：每台电机独立计算（直方图谷底检测）"
+        f"停机判定：固定 1.0A | 稳态提取：三阶段状态机"
     )
     sub.font      = _font(color="595959", size=9)
     sub.fill      = _fill("DDEEFF")
@@ -344,8 +361,8 @@ def build_summary_sheet(wb, results, period_desc, generated_at):
     ws.row_dimensions[2].height = 18
 
     # ── 表头 ──
-    headers = ["电机位号", "停机阈值 (A)", "均值 (A)", "最大值 (A)", "最小值 (A)",
-               "标准差 (A)", "累计运行 (h)", "数据点数（运行）", "总数据点数",
+    headers = ["电机位号", "均值 (A)", "最大值 (A)", "最小值 (A)",
+               "标准差 (A)", "累计运行 (h)", "稳态数据点", "总数据点数",
                "停机占比 (%)", "运行占比 (%)"]
     _write_header_row(ws, 3, headers, CLR_HEADER)
     ws.row_dimensions[3].height = 20
@@ -360,7 +377,6 @@ def build_summary_sheet(wb, results, period_desc, generated_at):
         # 异常着色：停机占比 >= 50% 标黄；avg 超过 40A 标橙红
         row_vals = [
             name,
-            r["stopped_threshold"],
             avg_v,
             s["max"]       if s["max"] is not None else "",
             s["min"]       if s["min"] is not None else "",
@@ -448,7 +464,7 @@ def build_motor_sheet(wb, r):
     # ── 标题 ──
     ws.merge_cells("A1:I1")
     t = ws["A1"]
-    t.value     = f"电机 {name} — 电流分析（停机阈值 {r['stopped_threshold']} A）"
+    t.value     = f"电机 {name} — 电流分析（稳态数据，停机判定 1.0A）"
     t.font      = Font(name=FONT_NAME, bold=True, size=12, color=CLR_WHITE)
     t.fill      = _fill(CLR_HEADER2)
     t.alignment = _center()
@@ -587,19 +603,14 @@ def main():
         print(f"  读取 {name}...", end=" ", flush=True)
         data_all = read_data(db, node_id, start_time, end_time_excl)
 
-        # 动态计算停机阈值（同预测性维护报告逻辑）
-        values_raw = [d["value"] for d in data_all if d["value"] is not None]
-        stopped_threshold = _find_stopped_threshold(values_raw)
-        print(f"阈值={stopped_threshold}A", end=" ", flush=True)
-
-        data_running = [d for d in data_all if d["value"] >= stopped_threshold]
-        stats = compute_stats(data_running, data_all, stopped_threshold)
+        # 稳态数据提取（三阶段状态机，与预测报告一致）
+        data_running = extract_steady_segments(data_all)
+        stats = compute_stats(data_all, data_running)
         results.append({
             "node_id":            node_id,
             "data_all":           data_all,
             "data_running":       data_running,
             "stats":              stats,
-            "stopped_threshold":  stopped_threshold,
         })
         print(f"全量 {stats['total']} 点，运行 {stats['count']} 点，"
               f"均值 {stats['avg']} A，运行 {stats['runtime_h']} h")

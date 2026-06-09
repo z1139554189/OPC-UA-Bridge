@@ -159,110 +159,147 @@ def _two_sided_cusum(values, target, std, k_factor=0.5, h_factor=5.0):
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# 停机数据过滤
+# 稳态数据提取 + 运行时长计算
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-def _find_stopped_threshold(values, bin_width=0.5):
-    """自动发现停机/运行分界线 — 基于直方图谷底检测。
-
-    对双峰分布，找到两峰之间计数最少的桶（谷底）作为阈值。
-    当谷底区域极宽（>5A）时，改用两峰中点，避免将运行峰左尾误判为谷底。
-    对单峰分布（只有运行数据），返回保守阈值 5.0A。
-    """
-    if not values:
-        return 0.0
-
-    valid = [v for v in values if v is not None and v > 0.01]
-    if len(valid) < 50:
-        return 5.0
-
-    from collections import Counter
-
-    # 1. 构建直方图（bin_width A 宽桶）
-    hist = Counter()
-    for v in valid:
-        b = round(v / bin_width) * bin_width   # round 避免浮点误差
-        hist[b] += 1
-
-    sorted_bins = sorted(hist.keys())
-    if len(sorted_bins) < 3:
-        return 5.0
-
-    # 2. 识别两个峰
-    #    停机峰：<2A 范围内计数最高的桶
-    stopped_peak_bin, stopped_peak_cnt = None, 0
-    for b in sorted_bins:
-        if b < 2.0 and hist[b] > stopped_peak_cnt:
-            stopped_peak_cnt = hist[b]
-            stopped_peak_bin = b
-
-    #    运行峰：>5A 范围内计数最高的桶
-    running_peak_bin, running_peak_cnt = None, 0
-    for b in sorted_bins:
-        if b > 5.0 and hist[b] > running_peak_cnt:
-            running_peak_cnt = hist[b]
-            running_peak_bin = b
-
-    # 3. 单峰分布处理
-    if stopped_peak_bin is None or stopped_peak_cnt < len(valid) * 0.005:
-        return 5.0
-
-    if running_peak_bin is None:
-        return 0.5
-
-    # 4. 找两峰之间的谷底区域
-    valley_bins = [
-        (b, hist[b])
-        for b in sorted_bins
-        if stopped_peak_bin < b < running_peak_bin
-    ]
-
-    if not valley_bins:
-        return round((stopped_peak_bin + running_peak_bin) / 2.0, 2)
-
-    # 5. 谷底区域极宽（>5A）时，用两峰中点
-    #   注意：用两峰桶的距离（完整范围），而非有数据桶的极值
-    valley_span = running_peak_bin - stopped_peak_bin
-    if valley_span > 5.0:
-        return round((stopped_peak_bin + running_peak_bin) / 2.0, 2)
-
-    # 6. 谷底窄，用计数最少的桶（验证不在峰边缘）
-    valley_bin, valley_cnt = min(valley_bins, key=lambda x: x[1])
-
-    if (valley_bin - stopped_peak_bin < 1.0 or
-            running_peak_bin - valley_bin < 1.0):
-        return round((stopped_peak_bin + running_peak_bin) / 2.0, 2)
-
-    # 返回谷底桶的上沿（偏运行侧）
-    return round(valley_bin + bin_width, 2)
+STOP_CURRENT_A = 1.0     # 停机判定电流 (A)，远低于正常运行 12~16A
+START_CONSECUTIVE = 10   # 连续 >1A 的点数（确认启动）
+SURGE_REMOVE = 50        # 启动浪涌剔除窗口
+STOP_CONSECUTIVE = 10    # 连续 <1A 的点数（确认停机）
+PRE_STOP_REMOVE = 70     # 停机前过渡剔除窗口
+RUNTIME_START_N = 5      # 运行时长 — 开始计时连续点数
+RUNTIME_STOP_N = 5       # 运行时长 — 停止计时连续点数
 
 
-def _filter_running(values, threshold, min_consecutive=10):
-    """过滤停机数据段 — 仅返回运行时段电流"""
-    if not values or threshold <= 0:
-        return values, 0
-    running, buffer = [], []
-    dropped = 0
-    for v in values:
+def extract_steady_segments(data_all):
+    """三阶段状态机 — 从全量数据中提取所有稳态段电流值。
+
+    规则:
+      停机→启动: 连续 {START_CONSECUTIVE} 点 > 1A，启动点 = 第 {START_CONSECUTIVE} 个
+      启动→稳态: 启动点后 {SURGE_REMOVE} 个点剔除（浪涌窗口）
+      稳态→停机: 连续 {STOP_CONSECUTIVE} 点 < 1A，停机点 = 第 {STOP_CONSECUTIVE} 个
+      稳态终点 = 停机点 - {PRE_STOP_REMOVE}（停机前过渡剔除）
+
+    返回: [float, ...]  — 全部稳态段的电流值（只用于分析预测）
+    """.format(START_CONSECUTIVE=START_CONSECUTIVE, PRE_STOP_REMOVE=PRE_STOP_REMOVE,
+               STOP_CONSECUTIVE=STOP_CONSECUTIVE, SURGE_REMOVE=SURGE_REMOVE)
+
+    STOPPED, STARTING, STEADY = 0, 1, 2
+    state = STOPPED
+    above_count = 0
+    below_count = 0
+    cnt_since_start = 0
+    steady_start_idx = None
+    steady_ranges = []  # [(start_idx, end_idx), ...]
+
+    for i, d in enumerate(data_all):
+        v = d["value"]
         if v is None:
             continue
-        if v < threshold:
-            buffer.append(v)
-            if len(buffer) >= min_consecutive:
-                dropped += len(buffer)
-                buffer = []
-        else:
-            if len(buffer) < min_consecutive:
-                running.extend(buffer)
+
+        if state == STOPPED:
+            if v > STOP_CURRENT_A:
+                above_count += 1
+                if above_count >= START_CONSECUTIVE:
+                    state = STARTING
+                    cnt_since_start = 0
+                    above_count = 0
             else:
-                dropped += len(buffer)
-            buffer = []
-            running.append(v)
-    if buffer and len(buffer) < min_consecutive:
-        running.extend(buffer)
-    else:
-        dropped += len(buffer)
-    return running, dropped
+                above_count = 0
+
+        elif state == STARTING:
+            cnt_since_start += 1
+            if cnt_since_start >= SURGE_REMOVE:
+                state = STEADY
+                steady_start_idx = i + 1
+                below_count = 0
+
+        elif state == STEADY:
+            if v < STOP_CURRENT_A:
+                below_count += 1
+                if below_count >= STOP_CONSECUTIVE:
+                    steady_end_idx = i - PRE_STOP_REMOVE
+                    if steady_start_idx is not None and steady_end_idx >= steady_start_idx:
+                        steady_ranges.append((steady_start_idx, steady_end_idx))
+                    state = STOPPED
+                    below_count = 0
+                    steady_start_idx = None
+            else:
+                below_count = 0
+
+    # 末尾仍在稳态（电机运行中，未检测到停机）
+    if state == STEADY and steady_start_idx is not None:
+        steady_ranges.append((steady_start_idx, len(data_all) - 1))
+
+    # 提取值
+    result = []
+    for start, end in steady_ranges:
+        for j in range(start, end + 1):
+            if j < len(data_all) and data_all[j]["value"] is not None:
+                result.append(data_all[j]["value"])
+    return result
+
+
+def calc_runtime(data_all):
+    """计算累计运行时长 — 与稳态提取完全独立。
+
+    规则:
+      开始计时: 连续 {RUNTIME_START_N} 点 > 1A
+      停止计时: 连续 {RUNTIME_STOP_N} 点 < 1A
+      时长 = 从计时开始到停止的时间差
+
+    返回: float (小时)
+    """.format(RUNTIME_START_N=RUNTIME_START_N, RUNTIME_STOP_N=RUNTIME_STOP_N)
+
+    RUNNING = "running"
+    STOPPED = "stopped"
+
+    state = STOPPED
+    above_count = 0
+    below_count = 0
+    run_start_ts = None
+    total_seconds = 0.0
+
+    for d in data_all:
+        v = d["value"]
+        if v is None:
+            continue
+        try:
+            ts = datetime.fromisoformat(d["timestamp"])
+        except (ValueError, TypeError):
+            continue
+
+        if state == STOPPED:
+            if v > STOP_CURRENT_A:
+                above_count += 1
+                if above_count >= RUNTIME_START_N:
+                    state = RUNNING
+                    run_start_ts = ts
+                    above_count = 0
+            else:
+                above_count = 0
+
+        elif state == RUNNING:
+            if v < STOP_CURRENT_A:
+                below_count += 1
+                if below_count >= RUNTIME_STOP_N:
+                    state = STOPPED
+                    if run_start_ts is not None:
+                        total_seconds += max(0.0, (ts - run_start_ts).total_seconds())
+                    run_start_ts = None
+                    below_count = 0
+            else:
+                below_count = 0
+
+    # 末尾仍在运行
+    if state == RUNNING and run_start_ts is not None:
+        try:
+            last_ts = datetime.fromisoformat(data_all[-1]["timestamp"])
+            total_seconds += max(0.0, (last_ts - run_start_ts).total_seconds())
+        except (ValueError, TypeError, IndexError):
+            pass
+
+    return round(total_seconds / 3600.0, 1)
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -561,26 +598,29 @@ def analyze_motor(node_id: str, all_data: list, now: datetime) -> dict:
             "error": f"数据点不足 ({total_points} 点)，无法进行可靠分析。至少需要 10 个数据点。",
         }
 
-    # ── 停机过滤 ──
-    stopped_threshold = _find_stopped_threshold(values_raw)
-    values_running, stopped_count = _filter_running(values_raw, stopped_threshold)
-    pct_stopped = round(stopped_count / max(1, total_points) * 100, 1)
+    # ── 稳态数据提取 ──
+    # 三阶段状态机：停机→启动(10点>1A)→浪涌剔除(50点)→稳态→停机前剔除(70点)→停机(10点<1A)
+    values_steady = extract_steady_segments(all_data)
+    # 用于统计的"运行数据"用稳态数据；同时统计 1A 以上的全量运行点数
+    values_running_simple = [v for v in values_raw if v is not None and v >= STOP_CURRENT_A]
+    running_count_raw = len(values_running_simple)
+    pct_stopped = round((total_points - running_count_raw) / max(1, total_points) * 100, 1)
 
-    if not values_running or len(values_running) < 10:
+    if not values_steady or len(values_steady) < 10:
         return {
             "node_id": node_id,
             "display_name": dn,
             "total_points": total_points,
-            "running_points": len(values_running),
+            "running_points": len(values_steady),
             "pct_stopped": pct_stopped,
             "data_insufficient": True,
             "error": (
-                f"运行数据不足（{len(values_running)} 点），停机占比 {pct_stopped}%。"
+                f"稳态数据不足（{len(values_steady)} 点），停机占比 {pct_stopped}%。"
                 "当前可能处于停机状态或数据积累不充分。"
             ),
         }
 
-    running_count = len(values_running)
+    running_count = len(values_steady)
 
     # ── 数据时间跨度 ──
     try:
@@ -596,19 +636,19 @@ def analyze_motor(node_id: str, all_data: list, now: datetime) -> dict:
     if data_span_days >= 14:
         # 充足数据: 最早 50% 做基线
         split = running_count // 2
-        baseline_values = values_running[:split]
-        analysis_values = values_running[split:]
+        baseline_values = values_steady[:split]
+        analysis_values = values_steady[split:]
         baseline_source = f"前 {data_span_days // 2} 天（{len(baseline_values)} 点）"
-    elif len(values_running) >= 100:
+    elif len(values_steady) >= 100:
         # 中等数据: 前半基线，后半分析
         split = running_count // 2
-        baseline_values = values_running[:split]
-        analysis_values = values_running[split:]
+        baseline_values = values_steady[:split]
+        analysis_values = values_steady[split:]
         baseline_source = f"前半段（{len(baseline_values)} 点，拆分）"
     else:
         # 数据少: 全部做基线，CUSUM 不可靠
-        baseline_values = values_running
-        analysis_values = values_running
+        baseline_values = values_steady
+        analysis_values = values_steady
         baseline_source = f"全量数据（{len(baseline_values)} 点，基线不稳定）"
 
     baseline_is_same = (baseline_values is analysis_values)
@@ -664,7 +704,7 @@ def analyze_motor(node_id: str, all_data: list, now: datetime) -> dict:
     recent_running_count = 0
     day_7_ago = now - timedelta(days=7)
     for r in all_data:
-        if r["value"] is None or r["value"] < stopped_threshold:
+        if r["value"] is None or r["value"] < STOP_CURRENT_A:
             continue
         recent_running_count += 1
         try:
@@ -742,56 +782,13 @@ def analyze_motor(node_id: str, all_data: list, now: datetime) -> dict:
         remaining_days = None  # 稳定无退化趋势，不给出固定寿命值
 
     # ── 累计运行时间 ──
-    # 正确做法：按"连续运行段"计算，每段 = 段内最后数据点 - 段内第一数据点。
-    # 段结束条件：相邻运行数据点间隔 > 60 秒（OPC UA 值不变时不推送，
-    # 超过 60 秒无推送说明要么停机要么网络异常，不计入运行时间）。
-    cumulative_hours = 0.0
-    seg_start_ts = None   # 当前运行段的第一条数据时间戳
-    seg_last_ts  = None   # 当前运行段最后一条数据时间戳
-    SEGMENT_GAP_LIMIT = 60  # 秒，超过此间隔认为段已结束
-
-    for r in all_data:
-        if r["value"] is None or r["value"] < stopped_threshold:
-            # 停机：结束当前段，累加段时长
-            if seg_start_ts is not None and seg_last_ts is not None:
-                dur_h = (seg_last_ts - seg_start_ts).total_seconds() / 3600
-                if dur_h > 0:
-                    cumulative_hours += dur_h
-            seg_start_ts = None
-            seg_last_ts  = None
-            continue
-        try:
-            cur_ts = datetime.fromisoformat(r["timestamp"])
-        except (ValueError, TypeError):
-            continue
-
-        if seg_start_ts is None:
-            # 新运行段开始
-            seg_start_ts = cur_ts
-            seg_last_ts  = cur_ts
-        else:
-            gap_s = (cur_ts - seg_last_ts).total_seconds()
-            if gap_s > SEGMENT_GAP_LIMIT:
-                # 间隔过长，结束当前段，开始新段
-                dur_h = (seg_last_ts - seg_start_ts).total_seconds() / 3600
-                if dur_h > 0:
-                    cumulative_hours += dur_h
-                seg_start_ts = cur_ts
-                seg_last_ts  = cur_ts
-            else:
-                # 同一段内，更新最后时间戳
-                seg_last_ts = cur_ts
-
-    # 循环结束后，处理最后一个未关闭的段
-    if seg_start_ts is not None and seg_last_ts is not None:
-        dur_h = (seg_last_ts - seg_start_ts).total_seconds() / 3600
-        if dur_h > 0:
-            cumulative_hours += dur_h
+    # 规则: 连续5点>1A开始计时, 连续5点<1A停止计时 (与稳态提取完全独立)
+    cumulative_hours = calc_runtime(all_data)
 
     # ── 日均统计 ──
     daily_stats = {}
     for r in all_data:
-        if r["value"] is None or r["value"] < stopped_threshold:
+        if r["value"] is None or r["value"] < STOP_CURRENT_A:
             continue
         try:
             day_key = r["timestamp"][:10]
@@ -842,7 +839,7 @@ def analyze_motor(node_id: str, all_data: list, now: datetime) -> dict:
         "data_span_days": data_span_days,
         "data_sufficient": data_sufficient,
         "baseline_source": baseline_source,
-        "stopped_threshold": round(stopped_threshold, 2),
+        "cumulative_hours": round(cumulative_hours, 1),
         "bl_median": round(bl_median, 2),
         "bl_std": round(bl_std, 3),
         "bl_kurtosis": round(bl_kurtosis, 3),
