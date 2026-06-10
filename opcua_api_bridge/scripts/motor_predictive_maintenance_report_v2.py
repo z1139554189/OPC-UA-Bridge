@@ -103,6 +103,127 @@ DI_THRESHOLDS = {
     # DI >= 50 危险
 }
 
+# 特征方向判定: 对于每个特征, ↑(向上)是恶化还是改善?
+# up_bad: mk_trend > 0 是坏方向（退化）
+# down_bad: mk_trend < 0 是坏方向（退化）
+FEATURE_DIRECTION = {
+    "mean_trend": "up_bad",            # 均值↑ = 电流漂移增大 = 坏
+    "std_trend": "up_bad",             # 标准差↑ = 波动增大 = 坏
+    "rms_trend": "up_bad",             # RMS↑ = 同均值
+    "skewness_trend": "up_bad",        # 偏度↑ = 冲击脉冲可能增多 = 坏
+    "sample_entropy_trend": "up_bad",  # 样本熵↑ = 信号更不规则 = 坏
+    "zero_cross_trend": "up_bad",      # 零交叉率↑ = 高频噪声增多 = 坏
+    "autocorr_decay_trend": "down_bad", # 自相关↓(mk_trend<0) = "记忆力"流失 = 坏
+    "outlier_freq_trend": "up_bad",    # 异常点频率↑ = 坏
+    "mean_accel": "up_bad",            # 均值漂移加速度↑ = 坏
+}
+
+# 弱趋势检测阈值: MK不显著但Sen斜率/基线 > 此值, 标记为"弱趋势"
+WEAK_TREND_THRESHOLD_PCT_PER_DAY = 0.15  # 0.15%/天 ≈ 4.5%/月
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 退化趋势 → 维护建议映射
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+def _degradation_maintenance_suggestions(feature_trends, di, di_label):
+    """根据退化特征生成维护建议"""
+    suggestions = []
+    
+    for ft in feature_trends:
+        if not ft.get("has_trend"):
+            continue
+        name = ft["name"]
+        is_bad = ft.get("is_bad_direction", True)
+        if not is_bad:
+            continue  # 好方向的变化不需要维护建议
+        
+        if name in ("mean_trend", "rms_trend"):
+            suggestions.append({
+                "feature": ft["label"],
+                "suggestion": (
+                    "电流均值持续上升，可能反映负载变化、绝缘老化或机械效率下降。"
+                    "建议：① 检查电机实际负载是否匹配铭牌额定值；"
+                    "② 测量绕组绝缘电阻（IEEE 43 标准）；"
+                    "③ 关注运行温升变化。"
+                ),
+            })
+        elif name == "std_trend":
+            suggestions.append({
+                "feature": ft["label"],
+                "suggestion": (
+                    "电流波动持续增大，常见原因包括机械松动、润滑不良或负载不稳定。"
+                    "建议：① 检查联轴器对中与紧固件扭矩；"
+                    "② 补充/更换轴承润滑脂；"
+                    "③ 进行振动频谱分析确认频域异常成分。"
+                ),
+            })
+        elif name == "sample_entropy_trend":
+            suggestions.append({
+                "feature": ft["label"],
+                "suggestion": (
+                    "信号规律性下降（样本熵上升），系统随机成分增加。"
+                    "常见于轴承早期磨损、电磁异常或转子条裂纹。"
+                    "建议：① 监测振动信号高频段变化趋势；"
+                    "② 条件允许时进行 MCSA（电机电流信号分析）频谱检测。"
+                ),
+            })
+        elif name == "zero_cross_trend":
+            suggestions.append({
+                "feature": ft["label"],
+                "suggestion": (
+                    "高频抖动成分增多（零交叉率上升），可能反映轴承滚道点蚀或电磁谐波。"
+                    "建议：① 进行振动频谱分析，关注高频段异常；"
+                    "② 检查电源谐波畸变率（THD）。"
+                ),
+            })
+        elif name == "autocorr_decay_trend":
+            suggestions.append({
+                "feature": ft["label"],
+                "suggestion": (
+                    "信号自相关性下降（\"记忆力\"流失），系统动态特性在变化。"
+                    "可能原因：转子气隙不均、转子导条缺陷或轴承游隙增大。"
+                    "建议：检查转子条完整性（可用振动频谱边带分析）。"
+                ),
+            })
+        elif name == "outlier_freq_trend":
+            suggestions.append({
+                "feature": ft["label"],
+                "suggestion": (
+                    "异常点频率上升，瞬时冲击事件增多。"
+                    "可能原因：机械碰摩、碎屑撞击或间歇性电气故障。"
+                    "建议：① 加强实时报警监控阈值；② 采集高频振动数据分析冲击事件特征。"
+                ),
+            })
+        elif name == "skewness_trend":
+            suggestions.append({
+                "feature": ft["label"],
+                "suggestion": (
+                    "电流分布偏斜度变化，可能反映单向冲击脉冲增多。"
+                    "建议：结合峭度指标综合判断是否为轴承点蚀早期特征。"
+                ),
+            })
+    
+    # DI 分级建议
+    if di_label in ("警告", "危险"):
+        suggestions.append({
+            "feature": "综合退化指数",
+            "suggestion": (
+                f"综合退化指数 DI={di}（{di_label}级别），多个维度同时出现恶化趋势。"
+                "强烈建议：① 安排近期计划性检修（2周内）；"
+                "② 增加巡检频次至每日1次；③ 准备备件（轴承、密封等常用件）。"
+            ),
+        })
+    elif di_label == "注意":
+        suggestions.append({
+            "feature": "综合退化指数",
+            "suggestion": (
+                f"综合退化指数 DI={di}（{di_label}级别），个别维度出现早期退化迹象。"
+                "建议：① 安排月度巡检时重点关注；② 可在下次计划停机时进行检查。"
+            ),
+        })
+    
+    return suggestions
+
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # SQLite 工具
@@ -212,28 +333,33 @@ STOP_CONSECUTIVE = 10    # 连续 <1A 的点数（确认停机）
 PRE_STOP_REMOVE = 70     # 停机前过渡剔除窗口
 RUNTIME_START_N = 5      # 运行时长 — 开始计时连续点数
 RUNTIME_STOP_N = 5       # 运行时长 — 停止计时连续点数
+MK_WINDOW = 60           # MK 稳态检测窗口 (点数，60=1min@1s采样)
+MK_P_THRESHOLD = 0.1     # MK p>=0.1 → 无显著单调趋势 → 判定稳态
 
 
 def extract_steady_segments(data_all):
-    """三阶段状态机 — 从全量数据中提取所有稳态段电流值。
+    """四阶段状态机 — 从全量数据中提取所有稳态段电流值。
 
     规则:
-      停机→启动: 连续 {START_CONSECUTIVE} 点 > 1A，启动点 = 第 {START_CONSECUTIVE} 个
-      启动→稳态: 启动点后 {SURGE_REMOVE} 个点剔除（浪涌窗口）
-      稳态→停机: 连续 {STOP_CONSECUTIVE} 点 < 1A，停机点 = 第 {STOP_CONSECUTIVE} 个
+      停机→启动: 连续 {START_CONSECUTIVE} 点 > 1A
+      启动→过渡: 启动点后剔除 {SURGE_REMOVE} 个浪涌点
+      过渡→稳态: MK 滑动窗口 ({MK_WINDOW}点=1min) 检测，p>={MK_P_THRESHOLD} → 无显著趋势 → 稳态
+      稳态→停机: 连续 {STOP_CONSECUTIVE} 点 < 1A
       稳态终点 = 停机点 - {PRE_STOP_REMOVE}（停机前过渡剔除）
 
     返回: [float, ...]  — 全部稳态段的电流值（只用于分析预测）
-    """.format(START_CONSECUTIVE=START_CONSECUTIVE, PRE_STOP_REMOVE=PRE_STOP_REMOVE,
-               STOP_CONSECUTIVE=STOP_CONSECUTIVE, SURGE_REMOVE=SURGE_REMOVE)
+    """.format(START_CONSECUTIVE=START_CONSECUTIVE, SURGE_REMOVE=SURGE_REMOVE,
+               MK_WINDOW=MK_WINDOW, MK_P_THRESHOLD=MK_P_THRESHOLD,
+               STOP_CONSECUTIVE=STOP_CONSECUTIVE, PRE_STOP_REMOVE=PRE_STOP_REMOVE)
 
-    STOPPED, STARTING, STEADY = 0, 1, 2
+    STOPPED, STARTING, TRANSITION, STEADY = 0, 1, 2, 3
     state = STOPPED
     above_count = 0
     below_count = 0
     cnt_since_start = 0
     steady_start_idx = None
-    steady_ranges = []  # [(start_idx, end_idx), ...]
+    steady_ranges = []      # [(start_idx, end_idx), ...]
+    transition_buffer = []  # [(value, index), ...] for MK sliding window
 
     for i, d in enumerate(data_all):
         v = d["value"]
@@ -253,9 +379,33 @@ def extract_steady_segments(data_all):
         elif state == STARTING:
             cnt_since_start += 1
             if cnt_since_start >= SURGE_REMOVE:
-                state = STEADY
-                steady_start_idx = i + 1
+                state = TRANSITION
+                transition_buffer = []
                 below_count = 0
+
+        elif state == TRANSITION:
+            # 先检测停机
+            if v < STOP_CURRENT_A:
+                below_count += 1
+                if below_count >= STOP_CONSECUTIVE:
+                    state = STOPPED
+                    below_count = 0
+                    transition_buffer = []
+                # 低电流点不加入缓冲，避免干扰 MK
+                continue
+            below_count = 0
+
+            # 加入过渡缓冲
+            transition_buffer.append((v, i))
+            if len(transition_buffer) >= MK_WINDOW:
+                recent = [p[0] for p in transition_buffer[-MK_WINDOW:]]
+                mk_result = _mann_kendall(recent)
+                if mk_result["p_value"] >= MK_P_THRESHOLD:
+                    # 最近 1min 无显著单调趋势 → 进入稳态
+                    steady_start_idx = transition_buffer[-MK_WINDOW][1]
+                    state = STEADY
+                    transition_buffer = []
+                    below_count = 0
 
         elif state == STEADY:
             if v < STOP_CURRENT_A:
@@ -273,6 +423,7 @@ def extract_steady_segments(data_all):
     # 末尾仍在稳态（电机运行中，未检测到停机）
     if state == STEADY and steady_start_idx is not None:
         steady_ranges.append((steady_start_idx, len(data_all) - 1))
+    # TRANSITION 状态下到达末尾 → 不记录稳态段（还没判定进入稳态）
 
     # 提取值
     result = []
@@ -890,11 +1041,11 @@ def _analyze_degradation_trends(window_features, steady_values, data_span_days):
             "di": 0.0,
             "di_label": "数据不足",
             "di_color": "#999",
+            "di_explanation": "窗口数不足20个，无法进行可靠的趋势分析。",
             "features_trend": [],
             "has_trends": False,
-            "recent_change": {},
-            "last_week_change": {},
-            "degradation_rate": 0.0,
+            "has_weak_trends": False,
+            "maintenance_suggestions": [],
             "window_count": len(window_features),
         }
 
@@ -939,10 +1090,40 @@ def _analyze_degradation_trends(window_features, steady_values, data_span_days):
         baseline_val = series[0] if series[0] != 0 else (1e-6 if series[0] >= 0 else -1e-6)
         trend_strength = abs(slope_per_day) / abs(baseline_val) * 100.0  # 百分比
 
-        # 子分数: 只在有显著趋势时才扣分
+        # ── 趋势判定 (三级: strong/weak/none) ──
+        # 1. MK显著 + 有方向 → strong trend
+        # 2. MK不显著但Sen斜率有意义(>弱趋势阈值) → weak trend (回答用户"整体有趋势但MK不显著"的疑问)
+        # 3. 其他 → none
+        weak_threshold_abs = WEAK_TREND_THRESHOLD_PCT_PER_DAY  # 0.15%/天
+        has_meaningful_slope = trend_strength >= weak_threshold_abs
+
         if mk["significant"] and mk["trend"] != 0:
-            # 趋势强度映射到 0-100
-            # < 0.5%/天 基本正常, > 5%/天 严重
+            trend_level = "strong"
+            has_trend = True
+            effective_trend = mk["trend"]  # 用MK判断的方向
+            p_display = f"p={mk['p_value']:.3f}"  # 保留3位有效数字
+        elif has_meaningful_slope and slope_per_day != 0:
+            trend_level = "weak"
+            has_trend = True
+            effective_trend = 1 if slope_per_day > 0 else -1  # 用Sen斜率判断方向
+            p_display = f"p={mk['p_value']:.3f} (弱趋势)"
+        else:
+            trend_level = "none"
+            has_trend = False
+            effective_trend = 0
+            p_display = f"p={mk['p_value']:.3f}"
+
+        # ── 方向判定: ↑是好事还是坏事? ──
+        dir_type = FEATURE_DIRECTION.get(di_key, "up_bad")
+        if dir_type == "down_bad":
+            # autocorr: mk_trend < 0 才是坏方向
+            is_bad_direction = (effective_trend < 0) if has_trend else False
+        else:
+            # up_bad: mk_trend > 0 是坏方向
+            is_bad_direction = (effective_trend > 0) if has_trend else False
+
+        # 子分数: 只在有显著趋势(strong)时才扣分, weak趋势给轻度分数
+        if trend_level == "strong":
             if trend_strength < 0.5:
                 sub_score = max(0, round(20 - trend_strength * 40, 1))
             elif trend_strength < 2.0:
@@ -951,11 +1132,12 @@ def _analyze_degradation_trends(window_features, steady_values, data_span_days):
                 sub_score = round(50 + (trend_strength - 2.0) / 3.0 * 30, 1)
             else:
                 sub_score = round(80 + min(20, (trend_strength - 5.0) * 2), 1)
+        elif trend_level == "weak":
+            sub_score = min(10.0, round(trend_strength / weak_threshold_abs * 5, 1))
         else:
             sub_score = 0.0
 
         # 最近1周 vs 前1周的变化
-        # 按窗口数量估算: 1周 = 168个1小时窗口 (假设连续运行)
         weeks_windows = min(168, len(series) // 2)
         if len(series) >= weeks_windows * 2:
             last_week_avg = sum(series[-weeks_windows:]) / weeks_windows
@@ -975,10 +1157,15 @@ def _analyze_degradation_trends(window_features, steady_values, data_span_days):
             "mk_significant": mk["significant"],
             "sen_slope_per_day": round(slope_per_day, 6),
             "trend_strength_pct": round(trend_strength, 4),
+            "effective_trend": effective_trend,
+            "trend_level": trend_level,
+            "has_trend": has_trend,
+            "is_bad_direction": is_bad_direction,
+            "direction_type": dir_type,
+            "p_display": p_display,
             "sub_score": round(sub_score, 1),
             "week_change_pct": week_change,
             "values": series,
-            # 最近变化量
             "first_val": round(series[0], 4),
             "last_val": round(series[-1], 4),
             "total_change_pct": round((series[-1] - series[0]) / max(abs(series[0]), 1e-9) * 100, 2),
@@ -990,8 +1177,11 @@ def _analyze_degradation_trends(window_features, steady_values, data_span_days):
             "di": 0.0,
             "di_label": "无法分析",
             "di_color": "#999",
+            "di_explanation": "未能提取到有效的窗口特征序列。",
             "features_trend": [],
             "has_trends": False,
+            "has_weak_trends": False,
+            "maintenance_suggestions": [],
             "window_count": len(window_features),
         }
 
@@ -1020,11 +1210,12 @@ def _analyze_degradation_trends(window_features, steady_values, data_span_days):
                     mean_accel_score = round(50 + min(30, (accel_strength - 5) * 3), 1)
 
     # ── DI 融合 ──
+    # 只统计坏方向的趋势（好方向的变化不算退化）
     di = 0.0
     active_features = 0
     for ft in feature_trends:
         w = DI_WEIGHTS.get(ft["name"], 0.0)
-        if w > 0:
+        if w > 0 and ft.get("is_bad_direction", True):
             di += ft["sub_score"] * w
             if ft["sub_score"] > 0:
                 active_features += 1
@@ -1062,12 +1253,43 @@ def _analyze_degradation_trends(window_features, steady_values, data_span_days):
         windows_per_day = len(window_features) / max(1, data_span_days)
         degradation_rate = abs(sen_all["slope"]) * windows_per_day
 
+    # ── DI=0 解释 ──
+    strong_count = sum(1 for ft in feature_trends if ft["trend_level"] == "strong")
+    weak_count = sum(1 for ft in feature_trends if ft["trend_level"] == "weak")
+    if di == 0:
+        if weak_count > 0:
+            di_explanation = (
+                f"DI=0 是因为所有维度均未通过MK显著性检验（p≥0.05），"
+                f"但检测到 {weak_count} 个弱趋势（Sen斜率有意义但MK不显著）。"
+                f"这通常意味着数据存在方向性迹象，但波动较大尚未达到统计显著性。"
+                f"建议持续观察后续趋势发展。"
+            )
+        else:
+            di_explanation = (
+                f"DI=0 是因为所有维度均未检测到显著单调趋势（MK p≥0.05），"
+                f"且Sen斜率也未超过弱趋势阈值（{WEAK_TREND_THRESHOLD_PCT_PER_DAY}%/天）。"
+                f"窗口特征序列呈随机波动，电机运行状态稳定，无明显退化迹象。"
+            )
+    else:
+        di_explanation = (
+            f"DI={di}，其中 {strong_count} 个强趋势（MK显著）+ {weak_count} 个弱趋势。"
+        )
+
+    # ── 维护建议 ──
+    has_weak_trends = weak_count > 0
+    maintenance_suggestions = _degradation_maintenance_suggestions(feature_trends, di, di_label)
+
     return {
         "di": di,
         "di_label": di_label,
         "di_color": di_color,
+        "di_explanation": di_explanation,
         "features_trend": feature_trends,
-        "has_trends": any(ft["mk_significant"] for ft in feature_trends),
+        "has_trends": strong_count > 0,
+        "has_weak_trends": has_weak_trends,
+        "strong_trend_count": strong_count,
+        "weak_trend_count": weak_count,
+        "maintenance_suggestions": maintenance_suggestions,
         "active_features_count": active_features,
         "mean_accel_score": round(mean_accel_score, 1),
         "degradation_rate": round(degradation_rate, 6),
@@ -1227,8 +1449,9 @@ def analyze_motor(node_id: str, all_data: list, now: datetime) -> dict:
         vol_score = _score_volatility(recent_rolling_std, bl_std)
 
     # ── 3. EWMA 趋势偏移 ──
-    ewma_values = _ewma(analysis_values, lam=0.15)
-    ewma_end = ewma_values[-1] if ewma_values else bl_median
+    # ewma_end 改用 analysis 期中位数，避免 λ=0.15 对尾端过于敏感
+    ewma_values = _ewma(analysis_values, lam=0.15)  # 保留供报告展示
+    ewma_end = sorted(analysis_values)[len(analysis_values) // 2]
     ewma_shift_sigmas = abs(ewma_end - bl_median) / max(bl_std, 0.01)
     ewma_score = _score_ewma(ewma_end, bl_median, bl_std)
 
@@ -1358,6 +1581,34 @@ def analyze_motor(node_id: str, all_data: list, now: datetime) -> dict:
             ),
         })
 
+    # ── 五维度评分明细（健康/关注/告警都需要展开原因）──
+    dim_detail = {}
+    dim_names_map = {
+        "cusum": ("CUSUM 累积漂移", "检测微小持续偏移"),
+        "volatility": ("电流波动增幅", "短期滚动标准差 vs 基线"),
+        "ewma": ("EWMA 趋势偏移", "指数加权移动平均偏离基线程度"),
+        "excursion": ("异常偏移频次", "近期超出2σ范围的频率"),
+        "kurtosis": ("峭度变化", "分布厚尾特征（冲击脉冲）"),
+    }
+    for key, (label, desc) in dim_names_map.items():
+        score = dim_scores.get(key)
+        if score is None:
+            continue
+        if score >= 85:
+            level = "优秀"
+        elif score >= 70:
+            level = "正常"
+        elif score >= 50:
+            level = "偏低"
+        else:
+            level = "告警"
+        dim_detail[key] = {
+            "label": label,
+            "desc": desc,
+            "score": score,
+            "level": level,
+        }
+
     # ── 趋势图数据 ──
     # 取分析期数据用于图表（降采样到最多 500 点）
     chart_raw = analysis_values
@@ -1376,7 +1627,11 @@ def analyze_motor(node_id: str, all_data: list, now: datetime) -> dict:
     except Exception as e:
         degradation = {
             "di": 0.0, "di_label": "分析错误", "di_color": "#999",
+            "di_explanation": f"分析异常: {e}",
             "features_trend": [], "has_trends": False,
+            "has_weak_trends": False,
+            "strong_trend_count": 0, "weak_trend_count": 0,
+            "maintenance_suggestions": [],
             "window_count": 0, "error": str(e),
         }
 
@@ -1412,6 +1667,7 @@ def analyze_motor(node_id: str, all_data: list, now: datetime) -> dict:
         "kurt_delta": round(kurt_delta, 3),
         "drift_per_day": round(drift_per_day, 4),
         "alerts": alerts,
+        "dim_detail": dim_detail,
         "daily_avg": daily_avg,
         "daily_max": daily_max,
         "chart_raw": chart_raw,
@@ -1765,54 +2021,127 @@ def generate_html_report(results: list, period_desc: str, generated_at: str,
                 )
             html += '</div>'
 
+        # ── 五维度评分明细 ──
+        dim_detail = r.get("dim_detail", {})
+        if dim_detail:
+            low_dims = {k: v for k, v in dim_detail.items() if v["score"] < 70}
+            if low_dims:
+                html += """
+<div style="margin-top:16px; background:#fff8e1; border-radius:8px; padding:16px; border-left:4px solid #e65100;">
+<h3 style="margin:0 0 12px 0; font-size:14px; color:#e65100;">健康度偏低原因分析</h3>
+<p style="font-size:12px; color:#666; margin-bottom:12px;">以下维度评分偏低导致综合健康度降至 {0}%：</p>
+<table style="width:100%; border-collapse:collapse; font-size:12px;">
+<tr style="background:#ffecb3;"><th style="padding:6px 10px; text-align:left;">维度</th><th style="padding:6px 10px;">评分</th><th style="padding:6px 10px;">等级</th><th style="padding:6px 10px; text-align:left;">说明</th></tr>
+""".format(r["overall"])
+                for key, info in sorted(low_dims.items(), key=lambda x: x[1]["score"]):
+                    color = "#c62828" if info["score"] < 50 else "#e65100"
+                    html += (
+                        f'<tr><td style="padding:6px 10px; font-weight:600;">{info["label"]}</td>'
+                        f'<td style="padding:6px 10px; text-align:center; color:{color}; font-weight:700;">{info["score"]}</td>'
+                        f'<td style="padding:6px 10px; text-align:center;">{info["level"]}</td>'
+                        f'<td style="padding:6px 10px; color:#666;">{info["desc"]}</td></tr>'
+                    )
+                html += "</table></div>"
+            else:
+                # 所有维度都60-70但综合偏低(因为分散拖累)
+                html += f"""
+<div style="margin-top:16px; background:#e8f5e9; border-radius:8px; padding:14px; border-left:4px solid #2e7d32;">
+  <span style="font-size:12px; color:#333;">各维度评分均处于正常范围（最低 {min((v['score'] for v in dim_detail.values()), default=70)} 分），"
+  综合健康度为 {r['overall']}% 属合理范围。</span>
+</div>"""
+
         # ── V3: 退化趋势分析 ──
         degradation = r.get("degradation")
         if degradation and degradation.get("window_count", 0) >= 10:
             dg = degradation
             trend_parts = []
             for ft in dg.get("features_trend", []):
-                if ft["mk_significant"]:
-                    sym = "&#8593;" if ft["mk_trend"] > 0 else "&#8595;"
-                    trend_parts.append(f'{ft["label"]} {sym}')
+                if ft.get("has_trend"):
+                    sym = "&#8593;" if ft["effective_trend"] > 0 else "&#8595;"
+                    level_mark = "" if ft["trend_level"] == "strong" else "~"
+                    trend_parts.append(f'{ft["label"]} {sym}{level_mark}')
             trend_summary = "、".join(trend_parts[:3]) or "无明显趋势"
+
+            # DI 解释
+            di_expl = dg.get("di_explanation", "")
+            arrow_note = (
+                "箭头方向基于<strong>全量历史数据的MK趋势检验 + Sen斜率估计</strong>"
+                "（非与上周/昨日对比），&#8593; 表示特征值随时间单调上升，&#8595; 表示下降。"
+                "标注 ~ 为弱趋势（Sen斜率有意义但MK不显著）。"
+            )
 
             html += f"""
 <div style="border-top:1px solid #eee; padding:16px 24px;">
-  <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:16px;">
+  <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:12px;">
     <h3 style="margin:0;">退化趋势分析</h3>
     <span class="degradation-di-badge" style="background:{dg['di_color']}">DI {dg['di']} — {dg['di_label']}</span>
   </div>
+  <div style="font-size:12px; color:#888; margin-bottom:16px; background:#f5f5f5; border-radius:6px; padding:10px 14px;">
+    {arrow_note}
+  </div>
+  <div style="font-size:12px; color:#666; margin-bottom:12px;">{di_expl}</div>
   <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); gap:8px; margin-bottom:12px;">
 """
             for ft in sorted(dg.get("features_trend", []), key=lambda x: x.get("order", 99)):
-                if not ft["mk_significant"]:
+                if not ft.get("has_trend"):
                     continue
-                trend_cls = "trend-up" if ft["mk_trend"] > 0 else "trend-down"
-                sym = "&#8593;" if ft["mk_trend"] > 0 else "&#8595;"
+                eff_trend = ft["effective_trend"]
+                is_bad = ft.get("is_bad_direction", True)
+                trend_cls = "trend-up" if eff_trend > 0 else "trend-down"
+                sym = "&#8593;" if eff_trend > 0 else "&#8595;"
+                level_label = "" if ft["trend_level"] == "strong" else " ~弱趋势~"
+                
+                # 方向标记
+                if is_bad:
+                    dir_badge = '<span style="font-size:11px;color:#c62828;font-weight:600;">⚠ 坏方向</span>'
+                else:
+                    dir_badge = '<span style="font-size:11px;color:#2e7d32;font-weight:600;">✅ 好方向</span>'
+                
+                # 弱趋势降低视觉权重
+                opacity = 'opacity:0.7;' if ft["trend_level"] == "weak" else ''
+                
                 html += f"""
-    <div class="degradation-feature-card {trend_cls}">
+    <div class="degradation-feature-card {trend_cls}" style="{opacity}">
       <div class="feature-trend-header">
-        <span class="ft-name">{ft['label']} {sym}</span>
+        <span class="ft-name">{ft['label']} {sym}{level_label}</span>
         <span class="ft-slope">{ft['sen_slope_per_day']:+.6f}/天</span>
       </div>
-      <div style="font-size:12px; color:#888; margin-bottom:4px;">
-        p={ft['mk_p_value']:.4f} | 趋势强度 {ft['trend_strength_pct']:.2f}%
+      <div style="font-size:12px; color:#888; margin-bottom:2px;">
+        {ft['p_display']} | 趋势强度 {ft['trend_strength_pct']:.2f}%
       </div>
-      <div style="font-size:11px; color:#999;">
-        全周期: {ft['first_val']:.4f} → {ft['last_val']:.4f} (变化 {ft['total_change_pct']:+.2f}%)
+      <div style="font-size:11px; margin-bottom:4px;">
+        {dir_badge}
+        <span style="color:#999; margin-left:6px;">全周期: {ft['first_val']:.4f} → {ft['last_val']:.4f} ({ft['total_change_pct']:+.2f}%)</span>
       </div>
     </div>
 """
-            if not any(ft["mk_significant"] for ft in dg.get("features_trend", [])):
+            if not any(ft.get("has_trend") for ft in dg.get("features_trend", [])):
                 html += f"""
     <div style="grid-column:1/-1; padding:16px; color:#999; font-size:13px;">
-      各维度特征均未检测到显著单调趋势，电机运行状态稳定。
+      各维度特征均未检测到显著单调趋势（含弱趋势检测），电机运行状态稳定。
     </div>
 """
-            html += """
+
+            # ── 退化维护建议 ──
+            maint = dg.get("maintenance_suggestions", [])
+            if maint:
+                html += """
   </div>
-  <div style="font-size:11px; color:#999;">
-    分析窗口数: """ + str(dg.get("window_count", 0)) + """ | 活跃特征: """ + str(dg.get("active_features_count", 0)) + """ | 算法: MK趋势检验 + Sen斜率估计 + 样本熵
+  <div style="margin-top:12px; background:#e8eaf6; border-radius:8px; padding:14px;">
+    <h4 style="margin:0 0 10px 0; font-size:13px; color:#1a237e;">退化趋势维护建议</h4>
+"""
+                for ms in maint:
+                    html += (
+                        f'<div style="margin-bottom:8px; font-size:12px; line-height:1.6;">'
+                        f'<strong style="color:#283593;">[{ms["feature"]}]</strong> '
+                        f'{ms["suggestion"]}</div>'
+                    )
+                html += '</div>'
+
+            html += f"""
+  </div>
+  <div style="font-size:11px; color:#999; margin-top:8px;">
+    分析窗口数: {dg.get("window_count", 0)} | 强趋势: {dg.get("strong_trend_count", 0)} | 弱趋势: {dg.get("weak_trend_count", 0)} | 算法: MK趋势检验 + Sen斜率估计 + 样本熵
   </div>
 </div>
 """
