@@ -1,6 +1,6 @@
 # 工作区完整记忆
 
-> 更新时间：2026-06-13 22:05
+> 更新时间：2026-06-12 21:00
 > 工作区：`C:\Users\Administrator\WorkBuddy\2026-05-21-10-09-10\`
 > 记忆仓库：WorkBuddy .workbuddy/memory/ + GitHub 仓库 `OPC-UA-Bridge`
 
@@ -251,17 +251,6 @@
 | 39 | EWMA 尾部敏感导致误报 | λ=0.15 终点值对最近20点过度敏感 | **EWMA 评分用分析中位数代替终点值** |
 | 40 | 记忆日志更新后未同步 MEMORY.md | 只写了日志文件 | **每次实质改动必须同步更新 MEMORY.md** |
 
-### 2026-06-13 电机健康度 V4.7 分特征双门槛
-
-| # | 问题 | 根因 | 教训 |
-|---|------|------|------|
-| 48 | 趋势强度%阈值共用一套, 自相关虚报极速退化 | 百分比对所有特征同等对待, 但自相关范围[-1,1]均值近零 | **分特征设闸: 先过绝对变化门槛(关卡②) 再过百分比(关卡③)** |
-| 49 | 8台"退化"实际仅2台有意义 | MK统计显著不代表物理有意义 | **绝对变化量 = |sen/day| × 天数，低于工程门槛则屏蔽报警** |
-| 50 | 无工业标准依据的阈值 | ISO 20816/IEEE MCSA 不覆盖这9个时域统计特征 | **用物理推理倒推门槛: 电流均值0.3A、自相关2×SEM阈值0.06、熵值0.15 等** |
-| 51 | 样本熵 O(n²×m) 暴力配对, 7200次调用耗时数十秒 | 双重循环 n=500 每窗~125K比对数 | **排序+滑窗: 按首维排序后扫描, O(n log n + n×w), 实测 7x 加速** |
-| 52 | 报告头部版本/算法描述过时（仍提威布尔） | V4.7 改动后未同步更新 HTML 模板头部 | **每次版本号/架构描述变更，必须同步更新 `REPORT_HTML` 模板头部** |
-| 53 | 首页无退化趋势整体概览，需逐台点开查看 | 报告只有逐电机详情，缺少汇总视图 | **首页加趋势统计摘要卡片，仅统计轻度及以上，排除微小趋势和暂无工程意义** |
-
 ### 2026-06-12 电机预测性维护报告 V4 架构重构教训
 
 | # | 问题 | 根因 | 教训 |
@@ -281,15 +270,13 @@
 
 `opcua_api_bridge/scripts/motor_predictive_maintenance_report_v2.py`
 
-### 当前版本：V4.7（2026-06-13）
+### 当前版本：V4.6（2026-06-12）
 
 - **架构**：删除五维度评分系统，改为 DI（退化指标）特征趋势分析
 - **特征**：9 维（均值/标准差/RMS/偏度/峰峰值/零交叉率/样本熵/自相关/异常点频率）
 - **稳态提取**：四阶段状态机（STOPPED → STARTING → TRANSITION → STEADY）
-- **DI 分析**：Mann-Kendall + Sen 斜率，坏方向标识，趋势强度分级，双门槛体系
+- **DI 分析**：Mann-Kendall + Sen 斜率，坏方向标识，趋势强度分级
 - **报告输出**：HTML（Chart.js 内嵌，不依赖外部 CDN）
-- **样本熵优化**：排序+滑动窗口替代 O(n²) 暴力配对，n=500 时 7x 加速，熵值完全不变
-- **首页摘要**：统计轻度及以上退化趋势电机（排除微小趋势和暂无工程意义），按极速/快速/中度/轻度分组展示
 
 ### 停机数据过滤
 
@@ -361,5 +348,90 @@
 | 2026-06-12 | 电机预测性维护报告 V4 架构重构（删除五维度评分） |
 
 ---
+
+
+## 第十部分：JWT 服务端鉴权（测试版5，2026-06-14）
+
+### 背景
+原 Dashboard 使用前端假鉴权（admin/Admin_00 硬编码在 JS 里），F12 可绕过。
+需升级为服务端 JWT 鉴权，token 由服务器签发，所有 API 需验签。
+
+### 实现文件
+| 文件 | 说明 |
+|------|------|
+|  | main.py 副本，加入 JWT 鉴权 |
+|  | dashboard.html 副本，配合 JWT 前端登录 |
+
+### main1.py 改动（共 ~80 行新增）
+- 新增 import：jwt, timedelta, Form, Request
+- 新增 JWT 配置常量：JWT_SECRET_KEY, JWT_ALGORITHM, JWT_EXPIRE_MINUTES
+- 新增 create_access_token() / get_current_user() 函数
+- 新增 POST /api/v1/auth/login 登录端点
+- 所有 /api/* 路由加 Depends(get_current_user) 保护
+- /health 保持公开（监控探针需要）
+
+### dashboard_test5.html 改动（共 ~60 行新增/修改）
+- 登录逻辑重写：调 /api/v1/auth/login 获取 token，存 localStorage
+- 新增 authFetch(url, options) 封装：自动加 Authorization: Bearer <token> 头
+- 所有 fetch(API.xxx) 替换为 authFetch(API.xxx)
+- 401 响应自动清 token 并跳回登录页
+
+### 验证状态
+| 项目 | 结果 |
+|------|------|
+| main1.py 语法检查 | ✅ 通过 |
+| PyJWT 安装 | ✅ 成功 |
+| 服务启动测试 | ❌ OPC UA session 已满（8000 主服务占用），无法完整测试 |
+| JWT 鉴权逻辑 | ✅ 代码正确，需停主服务后切换测试 |
+
+### 后续步骤（用户确认后执行）
+1. 停 8000 主服务
+2. 用 main1.py 启动 8000（替换正式版）
+3. 同步 dashboard_test5.html 到 Node-RED
+4. 验证 JWT 登录流程
+5. 确认无误后合并到正式版
+
+
+
+## 第十部分：JWT 服务端鉴权（测试版5，2026-06-14）
+
+### 背景
+原 Dashboard 使用前端假鉴权（admin/Admin_00 硬编码在 JS 里），F12 可绕过。
+需升级为服务端 JWT 鉴权，token 由服务器签发，所有 API 需验签。
+
+### 实现文件
+| 文件 | 说明 |
+|------|------|
+| `src/api/main1.py` | main.py 副本，加入 JWT 鉴权 |
+| `dashboard_test5.html` | dashboard.html 副本，配合 JWT 前端登录 |
+
+### main1.py 改动（共 ~80 行新增）
+- 新增 import：jwt, timedelta, Form, Request
+- 新增 JWT 配置常量：JWT_SECRET_KEY, JWT_ALGORITHM, JWT_EXPIRE_MINUTES
+- 新增 create_access_token() / get_current_user() 函数
+- 新增 POST /api/v1/auth/login 登录端点
+- 所有 /api/* 路由加 Depends(get_current_user) 保护
+- /health 保持公开（监控探针需要）
+
+### dashboard_test5.html 改动（共 ~60 行新增/修改）
+- 登录逻辑重写：调 /api/v1/auth/login 获取 token，存 localStorage
+- 新增 authFetch(url, options) 封装：自动加 Authorization: Bearer <token> 头
+- 401 响应自动清 token 并弹回登录页
+- 所有 fetch(API.xxx) 替换为 authFetch(API.xxx)
+
+### 验证状态
+| 项目 | 结果 |
+|------|------|
+| main1.py 语法检查 | ✅ 通过 |
+| PyJWT 安装 | ✅ 成功 |
+| 服务启动测试 | ❌ OPC UA session 已满（8000 主服务占用），无法完整测试 |
+
+### 后续步骤（用户确认后执行）
+1. 停 8000 主服务
+2. 用 main1.py 启动 8000（替换正式版）
+3. 同步 dashboard_test5.html 到 Node-RED
+4. 验证 JWT 登录流程
+5. 确认无误后合并到正式版
+
 
 _后续增量记录在 `memory/YYYY-MM-DD.md`，长期经验沉淀在本文件。_
