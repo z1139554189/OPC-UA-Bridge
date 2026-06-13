@@ -84,22 +84,62 @@ FEATURE_DIRECTION = {
 # 弱趋势检测阈值: MK不显著但Sen斜率/基线 > 此值, 标记为"弱趋势"
 WEAK_TREND_THRESHOLD_PCT_PER_DAY = 0.15  # 0.15%/天 ≈ 4.5%/月
 
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 分特征双门槛体系 (V4.7)
+#   关卡② 工程意义最低绝对变化量: 总变化量=|slope_per_day|×数据天数
+#     低于此值 → 趋势存在但绝对变化极小, 暂不触发退化报警
+#   关卡③ 分特征紧急程度%/天: (极速, 快速, 中度, 轻度)
+#     只有通过关卡②的特征才进入此判定
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# 绝对变化最低门槛 (总变化量, 非单日量)
+ENG_MIN_TOTAL_CHANGE = {
+    "mean_trend":           0.3,    # 电流均值 ≥0.3A (~2%额定值) 才有意义
+    "rms_trend":            0.3,    # 同上
+    "std_trend":            0.05,   # 标准差通常 ≤0.5A, 0.05A≈10%基线
+    "peak_to_peak_trend":   0.3,    # 峰峰值 ≥0.3A
+    "sample_entropy_trend": 0.15,   # 熵绝对值, 如 1.2→1.35
+    "zero_cross_trend":     0.002,  # 零交叉率绝对值小
+    "autocorr_decay_trend": 0.06,   # 相关系数 2×SEM (N≈3600)
+    "outlier_freq_trend":   0.003,  # 异常频率绝对值 ≥0.3%
+    "skewness_trend":       0.15,   # 偏度 ≥0.15
+}
+
+# 分特征紧急程度门槛 (%/天): (极速, 快速, 中度, 轻度)
+# - 电流均值/RMS负载相关 → 大变化才报警
+# - 标准差/峰峰值噪声大 → 门槛适当放宽
+# - 样本熵/零交叉/偏度波动大 → 门槛进一步放宽
+# - 自相关范围[-1,1]均值近零 → 百分比天然虚高, 门槛最高
+# - 异常点频率3σ后本已极少 → 绝对变化比百分比重要
+FEATURE_URGENCY_PCT = {
+    "mean_trend":           (10,  5,  2,  0.5),
+    "rms_trend":            (10,  5,  2,  0.5),
+    "std_trend":            (15,  8,  3,  0.8),
+    "peak_to_peak_trend":   (15,  8,  3,  0.8),
+    "sample_entropy_trend": (15,  8,  4,  1.0),
+    "zero_cross_trend":     (20, 10,  5,  1.5),
+    "autocorr_decay_trend": (20, 10,  5,  1.5),
+    "outlier_freq_trend":   (25, 12,  6,  2.0),
+    "skewness_trend":       (20, 10,  5,  1.5),
+}
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 退化趋势 → 维护建议映射
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 def _degradation_maintenance_suggestions(feature_trends):
-    """根据退化特征生成维护建议，含紧急程度标签"""
+    """根据退化特征生成维护建议，含紧急程度标签 (V4.7: 分特征查表 + 工程意义过滤)"""
     
-    def _urgency_info(strength_pct):
-        """根据趋势强度返回 (紧急标签, CSS颜色, 处理建议)"""
-        if strength_pct >= 10.0:
+    def _urgency_info(strength_pct, di_key):
+        """分特征查表返回 (紧急标签, CSS颜色, 处理建议)"""
+        rapid, fast, moderate, mild = FEATURE_URGENCY_PCT.get(di_key, (10, 5, 2, 0.5))
+        if strength_pct >= rapid:
             return ("⛔ 极速退化", "#b71c1c", "立即停机检查，未经检查不得恢复运行")
-        elif strength_pct >= 5.0:
+        elif strength_pct >= fast:
             return ("🔴 快速退化", "#d32f2f", "48小时内安排检查，准备所需备件")
-        elif strength_pct >= 2.0:
+        elif strength_pct >= moderate:
             return ("🟠 中度退化", "#e65100", "2周内安排针对性检查")
-        elif strength_pct >= 0.5:
+        elif strength_pct >= mild:
             return ("🟡 轻度退化", "#f57c00", "纳入月度巡检计划，跟踪趋势变化率")
         else:
             return (" 微小趋势", "#999", "暂不处理，持续观察3个月，趋势强度上升再升级")
@@ -114,8 +154,12 @@ def _degradation_maintenance_suggestions(feature_trends):
         if not is_bad:
             continue  # 好方向的变化不需要维护建议
         
+        # V4.7: 跳过绝对变化量不达工程意义门槛的特征
+        if not ft.get("eng_meaningful", True):
+            continue
+        
         strength = ft.get("trend_strength_pct", 0)
-        urgency_label, urgency_color, urgency_action = _urgency_info(strength)
+        urgency_label, urgency_color, urgency_action = _urgency_info(strength, name)
         
         if name in ("mean_trend", "rms_trend"):
             suggestions.append({
@@ -530,20 +574,44 @@ def _sample_entropy(values, m=SAMPEN_M, r_factor=SAMPEN_R_FACTOR):
     std_v = math.sqrt(sum((v - mean_v) ** 2 for v in values) / n)
     r = r_factor * max(std_v, 1e-9)
 
-    # 构建模板向量
+    # 构建模板向量 — 优化版: 排序+滑动窗口, O(n log n + n×w)
+    # 其中 w 为滑动窗口内平均点数, 通常远小于 n
+    # 排序按第一维聚集后, 向前扫描并检查所有维度:
+    #   由于只向前扫, 每个无序配对恰好计数一次 (不需要指数过滤).
     def _count_matches(m_len):
         """统计长度为 m_len 的模板匹配对数"""
+        L = n - m_len
+        if L < 2:
+            return 0
+
+        # 构建模板: (dim0, dim1, ..., dim_m-1)
+        templates = []
+        for idx in range(L):
+            tpl = tuple(values[idx + k] for k in range(m_len))
+            templates.append(tpl)
+
+        # 按第一维排序
+        templates.sort(key=lambda t: t[0])
+
         count = 0
-        for i in range(n - m_len):
-            for j in range(i + 1, n - m_len):
-                # Chebyshev 距离 (无穷范数)
+        for a in range(L):
+            t_a = templates[a]
+            v0_a = t_a[0]
+
+            for b in range(a + 1, L):
+                t_b = templates[b]
+                if t_b[0] - v0_a > r:
+                    break  # 排序保证: 后续所有点的第一维差值只会更大
+
+                # 检查剩余维度 (Chebyshev距离/无穷范数)
                 match = True
-                for k in range(m_len):
-                    if abs(values[i + k] - values[j + k]) > r:
+                for k in range(1, m_len):
+                    if abs(t_a[k] - t_b[k]) > r:
                         match = False
                         break
                 if match:
                     count += 1
+
         return count
 
     # 长度为 m 的匹配数
@@ -867,7 +935,7 @@ def _analyze_degradation_trends(window_features, steady_values, data_span_days):
 
         # ── 趋势判定 (三级: strong/weak/none) ──
         # 1. MK显著 + 有方向 → strong trend
-        # 2. MK不显著但Sen斜率有意义(>弱趋势阈值) → weak trend (回答用户"整体有趋势但MK不显著"的疑问)
+        # 2. MK不显著但Sen斜率有意义(>弱趋势阈值) → weak trend
         # 3. 其他 → none
         weak_threshold_abs = WEAK_TREND_THRESHOLD_PCT_PER_DAY  # 0.15%/天
         has_meaningful_slope = trend_strength >= weak_threshold_abs
@@ -876,7 +944,7 @@ def _analyze_degradation_trends(window_features, steady_values, data_span_days):
             trend_level = "strong"
             has_trend = True
             effective_trend = mk["trend"]  # 用MK判断的方向
-            p_display = f"p={mk['p_value']:.3f}"  # 保留3位有效数字
+            p_display = f"p={mk['p_value']:.3f}"
         elif has_meaningful_slope and slope_per_day != 0:
             trend_level = "weak"
             has_trend = True
@@ -887,6 +955,12 @@ def _analyze_degradation_trends(window_features, steady_values, data_span_days):
             has_trend = False
             effective_trend = 0
             p_display = f"p={mk['p_value']:.3f}"
+
+        # ── 关卡② 工程意义: 总绝对变化量是否超过最低门槛 ──
+        # 防止自相关等小量程特征百分比虚高（如绝对值从0.004→0.006, 相对+50%但无意义）
+        total_abs_change = abs(slope_per_day) * data_span_days
+        eng_min = ENG_MIN_TOTAL_CHANGE.get(di_key, 999)
+        eng_meaningful = has_trend and total_abs_change >= eng_min
 
         # ── 方向判定: ↑是好事还是坏事? ──
         dir_type = FEATURE_DIRECTION.get(di_key, "up_bad")
@@ -909,56 +983,70 @@ def _analyze_degradation_trends(window_features, steady_values, data_span_days):
             "skewness_trend": "偏斜度变化 → 电流分布不对称加剧。常见根因：单向冲击脉冲增多（如轴承单侧剥落产生的定向冲击）、三相不平衡导致的波形畸变。",
             "peak_to_peak_trend": "峰峰值增大 → 电流波动幅度加剧。常见根因：负载脉动增大（如搅拌器卡滞/不平衡）、电源电压波动、轴承游隙增大导致转子振动加剧调制到电流中。",
         }
-        # ── 退化速度标签（统一所有卡片主标签）──
-        def _degradation_speed_label(strength_pct):
-            """与 _di_urgency 一致"""
-            if strength_pct >= 10.0:
+        # ── 关卡③ 退化速度标签: 分特征查表（只有通过关卡②才进入）──
+        def _degradation_speed_label(strength_pct, di_key):
+            """分特征查表, 返回 (速度标签, CSS颜色)"""
+            if strength_pct is None:
+                return ("—", "#999")
+            rapid, fast, moderate, mild = FEATURE_URGENCY_PCT.get(di_key, (10, 5, 2, 0.5))
+            if strength_pct >= rapid:
                 return ("⛔ 极速退化", "#b71c1c")
-            elif strength_pct >= 5.0:
+            elif strength_pct >= fast:
                 return ("🔴 快速退化", "#d32f2f")
-            elif strength_pct >= 2.0:
+            elif strength_pct >= moderate:
                 return ("🟠 中度退化", "#e65100")
-            elif strength_pct >= 0.5:
+            elif strength_pct >= mild:
                 return ("🟡 轻度退化", "#f57c00")
             else:
                 return (" 微小趋势", "#999")
 
-        # 按趋势强度分级维护建议 (阈值 = trend_strength_pct 百分比/天)
-        # Emoji 和颜色必须与 _degradation_speed_label 完全一致
-        def _di_urgency(strength_pct):
-            if strength_pct >= 10.0:
+        def _di_urgency(strength_pct, di_key):
+            """分特征查表紧急程度文案"""
+            if strength_pct is None:
+                return ("—", "#999", "趋势强度未计算。")
+            rapid, fast, moderate, mild = FEATURE_URGENCY_PCT.get(di_key, (10, 5, 2, 0.5))
+            if strength_pct >= rapid:
                 return ("⛔ 极速退化 - 立即停机检查",
                         "#b71c1c",
-                        "退化速度极快(≥10%/天)，继续运行存在严重故障风险。建议立即停机排查根因，"
-                        "未经检查不得恢复运行。同时通知设备主管和生产调度。")
-            elif strength_pct >= 5.0:
+                        f"退化速度极快(≥{rapid}%/天)，继续运行存在严重故障风险。"
+                        "建议立即停机排查根因，未经检查不得恢复运行。")
+            elif strength_pct >= fast:
                 return ("🔴 快速退化 - 48小时内安排检查",
                         "#d32f2f",
-                        "退化加速(5-10%/天)，可能已进入故障加速期。建议48小时内安排停机检查，"
-                        "根据根因执行对应检查项，并提前准备所需备件。")
-            elif strength_pct >= 2.0:
+                        f"退化加速({fast}-{rapid}%/天)，可能已进入故障加速期。"
+                        "建议48小时内安排停机检查，并提前准备所需备件。")
+            elif strength_pct >= moderate:
                 return ("🟠 中度退化 - 2周内安排检查",
                         "#e65100",
-                        "退化速度明显(2-5%/天)，不可忽视。建议2周内安排针对性检查"
-                        "（根据根因选择对应检查项：振动分析/绝缘测试/联轴器检查等）。")
-            elif strength_pct >= 0.5:
+                        f"退化速度明显({moderate}-{fast}%/天)，不可忽视。"
+                        "建议2周内安排针对性检查（振动分析/绝缘测试/联轴器检查等）。")
+            elif strength_pct >= mild:
                 return ("🟡 轻度退化 - 纳入月度巡检",
                         "#f57c00",
-                        "趋势已显现但变化缓慢(0.5-2%/天)。建议月度巡检时重点关注该指标，"
-                        "记录连续趋势变化率，关注是否加速。")
+                        f"趋势已显现但变化缓慢({mild}-{moderate}%/天)。"
+                        "建议月度巡检时重点关注该指标，持续跟踪变化率。")
             else:
                 return ("微小趋势 - 持续观察",
                         "#999",
-                        "趋势变化微小(<0.5%/天)，暂不需要维护动作。建议持续观察3个月，"
-                        "若趋势强度上升或MK变显著再升级处理。")
+                        f"趋势变化微小(<{mild}%/天)，暂不需要维护动作。"
+                        "建议持续观察3个月，若趋势强度上升再升级处理。")
 
         if is_bad_direction:
             root_cause = _DI_ROOT_CAUSE.get(di_key, "")
-            urgency_title, urgency_color, urgency_msg = _di_urgency(trend_strength)
-            bad_direction_reason = (
-                f"【根因】{root_cause}\n\n"
-                f"【{urgency_title}】\n{urgency_msg}"
-            )
+            if eng_meaningful:
+                urgency_title, urgency_color, urgency_msg = _di_urgency(trend_strength, di_key)
+                bad_direction_reason = (
+                    f"【根因】{root_cause}\n\n"
+                    f"【{urgency_title}】\n{urgency_msg}"
+                )
+            else:
+                # 趋势统计存在但绝对变化量极小, 暂无工程意义
+                bad_direction_reason = (
+                    f"【根因】{root_cause}\n\n"
+                    f"【趋势存在但绝对变化极小】\n"
+                    f"总变化量 {total_abs_change:.4f} < 最低门槛 {eng_min}，"
+                    f"当前变化量暂不具备工程意义，建议持续观察不报警。"
+                )
         else:
             bad_direction_reason = ""
 
@@ -973,8 +1061,12 @@ def _analyze_degradation_trends(window_features, steady_values, data_span_days):
             prev_week_avg = last_week_avg
             week_change = 0.0
 
-        # 退化速度分级标签（统一，不与"弱趋势"互斥）
-        speed_label, speed_color = _degradation_speed_label(trend_strength)
+        # 退化速度分级标签: 工程意义不足时覆盖为"暂无工程意义"
+        if eng_meaningful:
+            speed_label, speed_color = _degradation_speed_label(trend_strength, di_key)
+        else:
+            speed_label = "暂无工程意义"
+            speed_color = "#aaa"
 
         ft = {
             "name": di_key,
@@ -989,6 +1081,8 @@ def _analyze_degradation_trends(window_features, steady_values, data_span_days):
             "trend_level": trend_level,
             "has_trend": has_trend,
             "is_bad_direction": is_bad_direction,
+            "eng_meaningful": eng_meaningful,
+            "total_abs_change": round(total_abs_change, 5),
             "bad_direction_reason": bad_direction_reason,
             "direction_type": dir_type,
             "p_display": p_display,
@@ -1194,15 +1288,21 @@ def analyze_motor(node_id: str, all_data: list, now: datetime) -> dict:
 
     # ── 退化趋势汇总统计 ──
     dg = degradation or {}
+    # 所有坏方向趋势 (含 eng_meaningful=False)
     has_bad_trends = any(
         ft.get("has_trend") and ft.get("is_bad_direction")
+        for ft in dg.get("features_trend", [])
+    )
+    # 有工程意义的坏方向趋势 (V4.7: 只有总量变足够大才算)
+    has_meaningful_trends = any(
+        ft.get("has_trend") and ft.get("is_bad_direction") and ft.get("eng_meaningful", True)
         for ft in dg.get("features_trend", [])
     )
     worst_speed = "—"
     worst_color = "#999"
     worst_strength = -1
     for ft in dg.get("features_trend", []):
-        if ft.get("has_trend") and ft.get("is_bad_direction"):
+        if ft.get("has_trend") and ft.get("is_bad_direction") and ft.get("eng_meaningful", True):
             s = ft.get("trend_strength_pct", 0)
             if s > worst_strength:
                 worst_strength = s
@@ -1229,6 +1329,7 @@ def analyze_motor(node_id: str, all_data: list, now: datetime) -> dict:
         "chart_ewma": chart_ewma,
         "degradation": degradation,
         "has_bad_trends": has_bad_trends,
+        "has_meaningful_trends": has_meaningful_trends,
         "worst_speed": worst_speed,
         "worst_color": worst_color,
         "strong_trend_count": dg.get("strong_trend_count", 0),
@@ -1255,6 +1356,8 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
                 box-shadow:0 1px 3px rgba(0,0,0,0.08); text-align:center; }
 .summary-card .num { font-size:28px; font-weight:700; }
 .summary-card .lbl { font-size:12px; color:#666; margin-top:4px; }
+.trend-summary { background:white; border-radius:12px; padding:20px 24px;
+                 box-shadow:0 1px 3px rgba(0,0,0,0.08); margin-bottom:24px; }
 .motor-section { background:white; border-radius:10px; margin-bottom:20px;
                  box-shadow:0 1px 3px rgba(0,0,0,0.08); overflow:hidden; }
 .motor-header { padding:18px 24px; display:flex; align-items:center;
@@ -1293,6 +1396,21 @@ def generate_html_report(results: list, period_desc: str, generated_at: str,
     analyzable = len(results) - insufficient
     total_running_points = sum(r.get("running_points", 0) for r in results)
 
+    # ── 退化趋势统计（仅统计轻度及以上，排除微小趋势和暂无工程意义）──
+    # 每台电机取最严重的 eng_meaningful 坏方向趋势
+    _URGENCY_ORDER = ["⛔ 极速退化", "🔴 快速退化", "🟠 中度退化", "🟡 轻度退化"]
+    urgency_counts = {label: [] for label in _URGENCY_ORDER}  # label -> [motor_names]
+    motors_with_trends = 0
+    for r in results:
+        if r.get("data_insufficient"):
+            continue
+        worst_label = r.get("worst_speed", "—")
+        if worst_label in _URGENCY_ORDER:
+            urgency_counts[worst_label].append(r.get("display_name", "?"))
+            motors_with_trends += 1
+
+    total_alert = motors_with_trends  # 有退化趋势的电机总数
+
     html = f"""<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -1307,9 +1425,9 @@ def generate_html_report(results: list, period_desc: str, generated_at: str,
 <div class="header">
   <h1>磺化釜搅拌电机 — 预测性维护周报</h1>
   <div class="sub">分析周期：{period_desc}</div>
-  <div class="sub">算法依据：ISO 20958:2013 / MCSA / 威布尔寿命估计 (IEC 61650, β=3.5) / MK趋势检验 + Sen斜率</div>
+  <div class="sub">算法依据：ISO 20958:2013 / MCSA / MK趋势检验 + Sen斜率估计</div>
   <div class="sub">数据范围：{data_start} ~ {data_end}（累积全量历史，仅含稳态运行时段）</div>
-  <div class="sub" style="color:#ffab40;">V4 架构：以 DI 特征退化趋势作为主动分析方法（已移除五维度全周期评分体系）</div>
+  <div class="sub" style="color:#ffab40;">V4.7 架构：DI特征退化趋势 + 双门槛体系（统计显著性 → 工程意义 → 分特征紧急程度）</div>
 </div>
 
 <div class="summary-grid">
@@ -1324,6 +1442,31 @@ def generate_html_report(results: list, period_desc: str, generated_at: str,
   <div class="summary-card">
     <div class="num">{total_running_points:,}</div>
     <div class="lbl">稳态运行数据点</div>
+  </div>
+</div>
+"""
+
+    # ── 退化趋势摘要（仅轻度及以上）──
+    if total_alert > 0:
+        alert_cards = ""
+        for label in _URGENCY_ORDER:
+            motors = urgency_counts[label]
+            if not motors:
+                continue
+            color_map = {"⛔ 极速退化": "#b71c1c", "🔴 快速退化": "#d32f2f",
+                         "🟠 中度退化": "#e65100", "🟡 轻度退化": "#f57c00"}
+            c = color_map.get(label, "#f57c00")
+            motor_list = ", ".join(motors)
+            short_label = label.split(" ")[1]  # "极速退化"
+            alert_cards += f"""  <div class="summary-card" style="border-left:4px solid {c};">
+    <div class="num" style="color:{c};font-size:24px;">{len(motors)}</div>
+    <div class="lbl">{short_label} · {motor_list}</div>
+  </div>"""
+        html += f"""
+<div class="trend-summary">
+  <h3 style="margin-bottom:12px;">退化趋势统计（仅统计轻度及以上，共 {total_alert} 台）</h3>
+  <div class="summary-grid">
+{alert_cards}
   </div>
 </div>
 """
@@ -1390,8 +1533,8 @@ def generate_html_report(results: list, period_desc: str, generated_at: str,
   </div>
   <div style="font-size:12px; color:#888; margin-bottom:16px; background:#f5f5f5; border-radius:6px; padding:10px 14px;">
     分析方法：将全量稳态数据按小时分窗 → 每窗口提取 9 维特征 → 对每维特征时间序列执行 MK 趋势检验 + Sen 斜率估计。
-    <br><strong>退化速度分级：</strong>极速≥10%/天 | 快速 5-10%/天 | 中度 2-5%/天 | 轻度 0.5-2%/天 | 微小＜0.5%/天。
-    <br>（注：MK 不显著表示数据噪声大但方向明确，不改变退化速度等级。）
+    <br><strong>V4.7 双门槛体系：</strong>① MK统计显著 → ② 绝对变化量过工程意义门槛 → ③ 分特征百分比判紧急程度。
+    <br>每次分析均提供 <em>总绝对变化量</em> 和 <em>最低工程意义门槛</em> 对比，低于门槛者标注「暂无工程意义」。
   </div>
   <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(240px,1fr)); gap:8px; margin-bottom:12px;">
 """
@@ -1418,6 +1561,15 @@ def generate_html_report(results: list, period_desc: str, generated_at: str,
 
                 speed_html = f'<span style="font-size:12px; font-weight:700; color:{speed_color};">{speed_label}</span>' if is_bad else ''
 
+                # V4.7: 显示绝对变化量 vs 工程意义门槛
+                total_abs = ft.get("total_abs_change", 0)
+                eng_meaningful = ft.get("eng_meaningful", True)
+                eng_min_val = ENG_MIN_TOTAL_CHANGE.get(ft.get("name", ""), 999)
+                if not eng_meaningful:
+                    eng_note = f' <span style="font-size:10px;color:#999;">(总变{total_abs:.4f}&lt;门槛{eng_min_val})</span>'
+                else:
+                    eng_note = f' <span style="font-size:10px;color:#666;">(总变{total_abs:.4f})</span>'
+
                 html += f"""
     <div class="degradation-feature-card {trend_cls}">
       <div class="feature-trend-header">
@@ -1425,7 +1577,7 @@ def generate_html_report(results: list, period_desc: str, generated_at: str,
         {speed_html}
       </div>
       <div style="font-size:12px; color:#888; margin-bottom:2px;">
-        趋势强度 {ft['trend_strength_pct']:.2f}%/天 | Sen斜率 {ft['sen_slope_per_day']:+.6f}/天{mk_note}
+        趋势强度 {ft['trend_strength_pct']:.2f}%/天 | Sen斜率 {ft['sen_slope_per_day']:+.6f}/天{eng_note}{mk_note}
       </div>
       <div style="font-size:11px; margin-bottom:4px;">
         {dir_badge}
@@ -1683,9 +1835,11 @@ def main():
             strong = dg.get("strong_trend_count", 0)
             weak = dg.get("weak_trend_count", 0)
             bad = result.get("has_bad_trends", False)
-            flag = "⚠" if bad else "✓"
+            meaningful = result.get("has_meaningful_trends", False)
+            flag = "⚠" if meaningful else ("?" if bad else "✓")
+            degrade_text = "是" if meaningful else ("(统计趋势,乏工程意义)" if bad else "否")
             print(f"{flag} 运行 {result['running_points']} 点 | "
-                  f"趋势: {strong}强{weak}弱 | 退化: {'是' if bad else '否'}")
+                  f"趋势: {strong}强{weak}弱 | 退化: {degrade_text}")
 
     db.close()
 
@@ -1713,12 +1867,13 @@ def main():
     # ── 摘要 ──
     valid = [r for r in results if not r.get("data_insufficient")]
     degrading_motors = []
+    # V4.7: 仅统计有工程意义的退化（绝对变化量过门槛）
     for r in valid:
         dg = r.get("degradation") or {}
-        if r.get("has_bad_trends"):
+        if r.get("has_meaningful_trends"):
             worst = r.get("worst_speed", "—")
             count = sum(1 for ft in dg.get("features_trend", [])
-                       if ft.get("has_trend") and ft.get("is_bad_direction"))
+                       if ft.get("has_trend") and ft.get("is_bad_direction") and ft.get("eng_meaningful", True))
             degrading_motors.append(f"{r['display_name']}({count}坏趋势/{worst})")
 
     print(f"\n{'═' * 60}")
