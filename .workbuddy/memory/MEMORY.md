@@ -64,7 +64,7 @@
 | 项目路径 | `C:\Users\Administrator\WorkBuddy\2026-05-21-10-09-10\OPC-UA-Bridge\opcua_api_bridge` |
 | GitHub | `https://github.com/z1139554189/OPC-UA-Bridge` |
 | 技术栈 | FastAPI + asyncua + SQLite + openpyxl + Chart.js |
-| 版本 | v3.0.0（client.py v7.1.0） |
+| 版本 | v3.1.0 / Dashboard V1.3（JWT 鉴权版） |
 
 ### OPC UA 服务器
 
@@ -103,12 +103,16 @@
 | 1（运行异常） | 重启 | 重启 |
 | 2（参数错误） | 不重启 | — |
 
-### Dashboard（V1.2 正式版，2026-06-05 发布）
+### Dashboard（V1.3 正式版，2026-06-14 发布）
 
 | 功能 | 说明 |
 |------|------|
-| 实时看板 | 0.5秒防重叠轮询，50 卡片（FIT 绿色 kg/h + ERR，FIQ 橙色 kg，IIAS 蓝色 A）+ 登录鉴权 |
-| 登录鉴权 | 账号 `admin` / 密码 `Admin_00`，纯前端 JS 验证 |
+| 实时看板 | 0.5秒防重叠轮询，50 卡片（FIT 绿色 kg/h + ERR，FIQ 橙色 kg，IIAS 蓝色 A）+ JWT 服务端鉴权 |
+| JWT 鉴权 | 账号 `admin` / 密码 `Admin_00`，HS256 算法，token 8h 过期，前端 localStorage 存储 |
+| Favicon | 内联 SVG "JQ" 图标 |
+| Powered by | 登录页和看板标题旁显示 "Powered by ZhangJiaqi" |
+| 无障碍 | aria-label、for 属性、隐藏 label，消除所有浏览器警告 |
+| Charset | 全局 CharsetMiddleware，所有响应头加 `charset=utf-8` |
 | FIT/FIQ ERR 状态 | Quality=Good 且 ERR=0 → 绿色 Good，否则红色 Bad |
 | 历史查询 | WPS 风格下拉选择器（分组 FIT/FIQ/IIAS/ERR、搜索过滤、全选/清空/选中搜索结果） |
 | Excel 导出 | 表头备注单位（如 `FIT_05R301F01.PV (kg/h)`），数据格纯数值，取离桶起始时间最近的值 |

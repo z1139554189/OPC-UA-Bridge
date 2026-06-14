@@ -53,7 +53,7 @@ security = HTTPBearer()
 # JWT 配置（生产环境请用环境变量存储 SECRET_KEY）
 JWT_SECRET_KEY = os.environ.get("JWT_SECRET_KEY", "opcua-bridge-secret-key-2026-change-in-prod")
 JWT_ALGORITHM = "HS256"
-JWT_EXPIRE_MINUTES = 120
+JWT_EXPIRE_MINUTES = 480  # 8 小时
 
 def create_access_token(data: dict) -> str:
     """生成 JWT access token"""
@@ -156,6 +156,19 @@ app = FastAPI(
     docs_url="/docs" if settings.DEBUG else None,
     redoc_url="/redoc" if settings.DEBUG else None
 )
+
+# 全局中间件：确保所有响应头包含 charset=utf-8
+from starlette.middleware.base import BaseHTTPMiddleware
+
+class CharsetMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request, call_next):
+        response = await call_next(request)
+        ct = response.headers.get("content-type", "")
+        if "charset" not in ct.lower() and ("text/" in ct or "application/json" in ct):
+            response.headers["content-type"] = f"{ct}; charset=utf-8"
+        return response
+
+app.add_middleware(CharsetMiddleware)
 
 # CORS 中间件
 app.add_middleware(
@@ -393,10 +406,12 @@ async def dashboard_test4():
 @app.get("/dashboard_test5", tags=["可视化"])
 async def dashboard_test5():
     """OPC UA 可视化看板（测试版5 — JWT 服务端鉴权）"""
-    from fastapi.responses import FileResponse
+    from fastapi.responses import Response
     import os
     test5_path = os.path.join(os.path.dirname(__file__), "..", "..", "dashboard_test5.html")
-    return FileResponse(test5_path)
+    with open(test5_path, "r", encoding="utf-8") as f:
+        content = f.read()
+    return Response(content=content, media_type="text/html; charset=utf-8")
 
 # Prometheus 指标端点（需鉴权）
 @app.get("/metrics", tags=["监控"])

@@ -16,17 +16,18 @@ import asyncio
 import io
 import math
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional, Dict, Any, List
 
-from fastapi import FastAPI, Depends, HTTPException, status, Query
+from fastapi import FastAPI, Depends, HTTPException, status, Query, Form, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse, RedirectResponse, HTMLResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 import structlog
 from pydantic import BaseModel, Field
 import openpyxl
 from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
+import jwt
 
 from src.config.settings import settings
 from src.monitoring.metrics import metrics_registry
@@ -48,6 +49,35 @@ opcua_client: Optional[OPCUAClient] = None
 
 # 认证
 security = HTTPBearer()
+
+# JWT 配置（生产环境请用环境变量存储 SECRET_KEY）
+JWT_SECRET_KEY = os.environ.get("JWT_SECRET_KEY", "opcua-bridge-secret-key-2026-change-in-prod")
+JWT_ALGORITHM = "HS256"
+JWT_EXPIRE_MINUTES = 480  # 8 小时
+
+def create_access_token(data: dict) -> str:
+    """生成 JWT access token"""
+    to_encode = data.copy()
+    expire = datetime.utcnow() + timedelta(minutes=JWT_EXPIRE_MINUTES)
+    to_encode["exp"] = expire
+    return jwt.encode(to_encode, JWT_SECRET_KEY, algorithm=JWT_ALGORITHM)
+
+async def get_current_user(cred: HTTPAuthorizationCredentials = Depends(security)):
+    """JWT 鉴权依赖：验证 token，失败抛 401"""
+    try:
+        payload = jwt.decode(cred.credentials, JWT_SECRET_KEY, algorithms=[JWT_ALGORITHM])
+        username: str = payload.get("sub")
+        if username is None:
+            raise HTTPException(status_code=401, detail="Token 无效", headers={"WWW-Authenticate": "Bearer"})
+        return username
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Token 已过期", headers={"WWW-Authenticate": "Bearer"})
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="Token 无效", headers={"WWW-Authenticate": "Bearer"})
+
+# 登录账号密码（生产环境请存入数据库或环境变量）
+LOGIN_USERNAME = os.environ.get("DASHBOARD_USER", "admin")
+LOGIN_PASSWORD = os.environ.get("DASHBOARD_PASS", "Admin_00")
 
 # 应用启动时间
 _start_time = time.time()
@@ -135,6 +165,34 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# ========== CharsetMiddleware：给所有响应加 charset=utf-8 ==========
+class CharsetMiddleware:
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        # 拦截 send，修改响应头
+        original_send = send
+        async def send_wrapper(message):
+            if message["type"] == "http.response.start":
+                headers = dict(message.get("headers", []))
+                # 如果有 content-type 但没有 charset，自动追加
+                ct = headers.get(b"content-type", b"").decode("utf-8", errors="ignore")
+                if ct and "charset" not in ct.lower():
+                    if ct.startswith("text/") or "application/json" in ct:
+                        new_ct = ct + "; charset=utf-8"
+                        headers[b"content-type"] = new_ct.encode("utf-8")
+                        message["headers"] = list(headers.items())
+            await original_send(message)
+
+        await self.app(scope, receive, send_wrapper)
+
+app.add_middleware(CharsetMiddleware)
+
 # 全局异常处理
 @app.exception_handler(Exception)
 async def global_exception_handler(request, exc):
@@ -166,9 +224,21 @@ async def health_check():
             content=status_result
         )
 
+# 登录端点（无需鉴权）
+@app.post("/api/v1/auth/login", tags=["认证"], summary="用户登录，返回 JWT")
+async def login(username: str = Form(...), password: str = Form(...)):
+    """验证账号密码，返回 JWT access token"""
+    if username == LOGIN_USERNAME and password == LOGIN_PASSWORD:
+        token = create_access_token({"sub": username, "role": "admin"})
+        return {"access_token": token, "token_type": "bearer", "expires_minutes": JWT_EXPIRE_MINUTES}
+    logger.warning("login_failed", username=username)
+    raise HTTPException(status_code=401, detail="账号或密码错误")
+
+
 # 节点管理路由
 @app.get("/api/v1/nodes", tags=["节点管理"])
 async def get_nodes(
+    user: str = Depends(get_current_user),
     node_id: Optional[str] = Query(None, description="起始节点ID，不填则从 Objects 根节点开始"),
     namespace: Optional[int] = Query(None, description="命名空间过滤，如 1 只返回 ns=1 的节点"),
     recursive: bool = Query(False, description="是否递归（默认关闭，数据量大时容易超时）"),
@@ -196,6 +266,23 @@ async def get_nodes(
         )
         return {"nodes": nodes, "count": len(nodes), "offset": offset, "limit": limit}
     except Exception as e:
+        error_msg = str(e)
+        if "BadTooManySessions" in error_msg or "maximum number of sessions" in error_msg:
+            cache_data = opcua_client.get_cache_snapshot()
+            nodes = [
+                {
+                    "node_id": nid,
+                    "namespace": int(nid.split("ns=")[1].split(";")[0]) if "ns=" in nid else 0,
+                    "browse_name": nid,
+                    "display_name": nid,
+                    "node_class": "Variable",
+                    "value": info.get("value"),
+                    "quality": info.get("quality"),
+                    "timestamp": info.get("timestamp"),
+                }
+                for nid, info in cache_data.items()
+            ]
+            return {"nodes": nodes, "count": len(nodes), "offset": 0, "limit": len(nodes), "fallback": "cache"}
         logger.error("get_nodes_failed", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -204,7 +291,7 @@ async def get_nodes(
 
 # 读取节点值
 @app.get("/api/v1/nodes/{node_id}/value", tags=["数据读取"])
-async def read_node_value(node_id: str):
+async def read_node_value(node_id: str, user: str = Depends(get_current_user)):
     """
     读取指定节点的当前值（从缓存读取，并注册到采集列表）
     """
@@ -232,7 +319,7 @@ async def read_node_value(node_id: str):
 
 # 批量读取节点值
 @app.post("/api/v1/nodes/batch-read", tags=["数据读取"])
-async def batch_read_values(node_ids: list[str]):
+async def batch_read_values(node_ids: list[str], user: str = Depends(get_current_user)):
     """
     批量读取多个节点的值（从缓存读取，并注册到采集列表）。
     首次请求时节点可能尚未采集到数据，订阅推送后即可获取。
@@ -255,7 +342,7 @@ async def batch_read_values(node_ids: list[str]):
 
 # 查看订阅缓存状态
 @app.get("/api/v1/cache/stats", tags=["监控"])
-async def cache_stats():
+async def cache_stats(user: str = Depends(get_current_user)):
     """查看订阅缓存统计"""
     if not opcua_client:
         raise HTTPException(status_code=503, detail="OPC UA 客户端未连接")
@@ -272,6 +359,7 @@ async def cache_stats():
 @app.get("/api/v1/nodes/{node_id}/history", tags=["历史数据"])
 async def read_history(
     node_id: str,
+    user: str = Depends(get_current_user),
     start_time: str = Query(..., description="开始时间 (ISO格式)"),
     end_time: str = Query(..., description="结束时间 (ISO格式)"),
     max_points: int = Query(1000, description="最大数据点数")
@@ -309,7 +397,7 @@ async def dashboard():
     from fastapi.responses import FileResponse
     import os
     dashboard_path = os.path.join(os.path.dirname(__file__), "..", "..", "dashboard.html")
-    return FileResponse(dashboard_path)
+    return FileResponse(dashboard_path, media_type="text/html; charset=utf-8")
 
 # Dashboard 测试版
 @app.get("/dashboard_test", tags=["可视化"])
@@ -412,7 +500,7 @@ def _sample_data(rows: List[Dict], interval_seconds: int, start_time: str, end_t
 
 
 @app.post("/api/v1/history/query", response_model=BatchHistoryResponse, tags=["历史数据"])
-async def batch_history_query(req: BatchHistoryRequest):
+async def batch_history_query(req: BatchHistoryRequest, user: str = Depends(get_current_user)):
     """
     批量查询多节点历史数据（从 SQLite），支持时间采样。
     - 返回每个节点按 interval_seconds 采样后的序列
@@ -443,7 +531,7 @@ async def batch_history_query(req: BatchHistoryRequest):
 
 
 @app.post("/api/v1/history/export", tags=["历史数据"])
-async def batch_history_export(req: BatchHistoryRequest):
+async def batch_history_export(req: BatchHistoryRequest, user: str = Depends(get_current_user)):
     """
     批量查询历史数据并导出为 Excel 文件。
     - 参数与 /api/v1/history/query 一致
