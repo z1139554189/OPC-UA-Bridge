@@ -448,16 +448,8 @@ async def metrics():
 # 根路由
 @app.get("/")
 async def root():
-    """API 根路径"""
-    return {
-        "name": "OPC UA REST API Bridge",
-        "version": "3.0.0",
-        "mode": "adaptive_collect",
-        "collect_status": opcua_client.get_collect_status() if opcua_client else "not_initialized",
-        "status": "operational" if opcua_client else "degraded",
-        "docs": "/docs" if settings.DEBUG else None,
-        "health": "/health"
-    }
+    """API 根路径 — 自动跳转到 Dashboard"""
+    return RedirectResponse(url="/dashboard")
 
 # ─── 批量历史查询 + Excel 导出 ──────────────────────────
 
