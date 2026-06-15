@@ -586,7 +586,7 @@ def main():
         )
 
     start_time    = start_dt.strftime("%Y-%m-%dT%H:%M:%S")
-    end_time_excl = (end_dt + timedelta(seconds=1)).strftime("%Y-%m-%dT%H:%M:%S")
+    end_time_excl = end_dt.strftime("%Y-%m-%dT%H:%M:%S")
     generated_at  = now.strftime("%Y-%m-%d %H:%M:%S")
 
     print("=" * 60)
