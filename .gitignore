@@ -32,5 +32,5 @@ reporter/*.xlsx
 .workbuddy/*
 !.workbuddy/memory/
 
-# ===== 临时截图 =====
-*.png
+# ===== 报告文件（不推送 Git）=====
+opcua_api_bridge/reports/

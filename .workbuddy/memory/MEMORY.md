@@ -328,9 +328,11 @@
 ### Git 推送流程
 
 1. `git status` + 检查无遗漏
-2. `git add` 所有有价值文件（代码 + 记忆 + 日志）
+2. `git add` 所有有价值文件（代码 + 记忆 + 日志，**不含报告文件**）
 3. `git commit` 提交
 4. `git push origin main`（用 PortableGit + dangerouslyDisableSandbox）
+
+> **不推送的报告文件：** 预测维护报告 `*predictive_report*.html`、Excel 周报 `*weekly*.xlsx` 等自动生成的文件，已在 `.gitignore` 中排除。
 
 ### 记忆整合流程（重要！）
 
