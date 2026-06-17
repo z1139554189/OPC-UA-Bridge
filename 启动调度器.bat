@@ -1,12 +1,12 @@
 @echo off
 chcp 65001 >nul
 echo ============================================
-echo    OPC UA Bridge - 停止桥接器
+echo    OPC UA Bridge - 启动调度器
 echo ============================================
-net stop OPCUABridge
+net start OPCUAScheduler
 if %errorlevel%==0 (
-    echo [+] 桥接器: 已停止
+    echo [+] 调度器: 已启动
 ) else (
-    echo [-] 桥接器: 可能已停止或无法响应
+    echo [-] 调度器: 可能已在运行
 )
 pause
