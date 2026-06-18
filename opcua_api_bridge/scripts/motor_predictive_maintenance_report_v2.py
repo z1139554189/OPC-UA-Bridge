@@ -128,39 +128,36 @@ FEATURE_URGENCY_PCT = {
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 def _degradation_maintenance_suggestions(feature_trends):
-    """根据退化特征生成维护建议，含紧急程度标签 (V4.7: 分特征查表 + 工程意义过滤)"""
-    
-    def _urgency_info(strength_pct, di_key):
-        """分特征查表返回 (紧急标签, CSS颜色, 处理建议)"""
-        rapid, fast, moderate, mild = FEATURE_URGENCY_PCT.get(di_key, (10, 5, 2, 0.5))
-        if strength_pct >= rapid:
-            return ("⛔ 极速退化", "#b71c1c", "立即停机检查，未经检查不得恢复运行")
-        elif strength_pct >= fast:
-            return ("🔴 快速退化", "#d32f2f", "48小时内安排检查，准备所需备件")
-        elif strength_pct >= moderate:
-            return ("🟠 中度退化", "#e65100", "2周内安排针对性检查")
-        elif strength_pct >= mild:
-            return ("🟡 轻度退化", "#f57c00", "纳入月度巡检计划，跟踪趋势变化率")
-        else:
-            return (" 微小趋势", "#999", "暂不处理，持续观察3个月，趋势强度上升再升级")
-    
+    """根据退化特征生成维护建议 (V4.7: 仅轻度及以上退化才生成建议)"""
+
+    _SKIP_LABELS = {" 暂无工程意义", " 微小趋势"}
+    # 轻度及以上 → 需要维护建议的 action 文案
+    _ACTION_MAP = {
+        "⛔ 极速退化": "立即停机检查，未经检查不得恢复运行",
+        "🔴 快速退化": "48小时内安排检查，准备所需备件",
+        "🟠 中度退化": "2周内安排针对性检查",
+        "🟡 轻度退化": "纳入月度巡检计划，跟踪趋势变化率",
+    }
+
     suggestions = []
-    
+
     for ft in feature_trends:
         if not ft.get("has_trend"):
             continue
-        name = ft["name"]
         is_bad = ft.get("is_bad_direction", True)
         if not is_bad:
-            continue  # 好方向的变化不需要维护建议
-        
-        # V4.7: 跳过绝对变化量不达工程意义门槛的特征
-        if not ft.get("eng_meaningful", True):
+            continue  # 好方向不需要维护建议
+
+        # 跳过暂无工程意义和微小趋势
+        if ft.get("speed_label", "") in _SKIP_LABELS:
             continue
-        
-        strength = ft.get("trend_strength_pct", 0)
-        urgency_label, urgency_color, urgency_action = _urgency_info(strength, name)
-        
+
+        # 直接复用已计算好的 speed_label / speed_color
+        urgency_label = ft.get("speed_label", "")
+        urgency_color = ft.get("speed_color", "#999")
+        urgency_action = _ACTION_MAP.get(urgency_label, "")
+        name = ft["name"]
+
         if name in ("mean_trend", "rms_trend"):
             suggestions.append({
                 "feature": ft["label"],
@@ -219,7 +216,7 @@ def _degradation_maintenance_suggestions(feature_trends):
                 "urgency_color": urgency_color,
                 "urgency_action": urgency_action,
                 "suggestion": (
-                    "信号自相关性下降（\"记忆力\"流失），系统动态特性在变化。"
+                    '信号自相关性下降（"记忆力"流失），系统动态特性在变化。'
                     "可能原因：转子气隙不均、转子导条缺陷或轴承游隙增大。"
                     "建议：检查转子条完整性（可用振动频谱边带分析）。"
                 ),
@@ -258,13 +255,8 @@ def _degradation_maintenance_suggestions(feature_trends):
                     "建议：① 检查负载稳定性（搅拌器/泵工况）；② 测量电源电压波动范围；③ 检查联轴器及轴承游隙。"
                 ),
             })
-    
+
     return suggestions
-
-
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# SQLite 工具
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 def _safe_table(node_id: str) -> str:
     """将 NodeID 转为 SQLite 安全表名 (与 storage/__init__.py 一致)"""
@@ -467,7 +459,8 @@ def extract_steady_segments(data_all):
     for start, end in steady_ranges:
         for j in range(start, end + 1):
             if j < len(data_all) and data_all[j]["value"] is not None:
-                result.append(data_all[j]["value"])
+                ts_str = data_all[j]["timestamp"].split(".")[0]
+                result.append((ts_str, data_all[j]["value"]))
     return result
 
 
@@ -789,27 +782,32 @@ def _sen_slope(values):
         return {"slope": (slopes[mid - 1] + slopes[mid]) / 2.0}
 
 
-def _compute_window_features(steady_values, window_seconds=WINDOW_SECONDS):
-    """将稳态数据按时长窗口分段，每窗口计算10个特征。
+def _compute_window_features(steady_tv, window_seconds=WINDOW_SECONDS):
+    """
+    将稳态数据按时长窗口分段，每窗口计算10个特征。
 
     Args:
-        steady_values: 稳态电流值列表 (按时间顺序)
+        steady_tv: 稳态电流值列表 (按时间顺序)
         window_seconds: 窗口时长(秒), 默认3600
 
     Returns:
         list[dict]: 每个窗口的特征字典, 按时间顺序排列
     """
+    # Extract values from (timestamp, value) tuples if needed
+    if steady_tv and isinstance(steady_tv[0], tuple):
+        steady_tv = [v for _, v in steady_tv]
+    
     wp = max(WINDOW_MIN_POINTS, window_seconds)  # 最少1小时=3600点
     if window_seconds < wp:
         wp = window_seconds
 
     windows = []
     start = 0
-    total = len(steady_values)
+    total = len(steady_tv)
 
     while start < total:
         end = min(start + wp, total)
-        chunk = steady_values[start:end]
+        chunk = steady_tv[start:end]
 
         if len(chunk) < WINDOW_MIN_POINTS:
             start = end
@@ -871,267 +869,127 @@ def _compute_window_features(steady_values, window_seconds=WINDOW_SECONDS):
     return windows
 
 
-def _analyze_degradation_trends(window_features, steady_values, data_span_days):
-    """对窗口特征序列进行趋势分析，输出退化指数。
+def _analyze_degradation_trends(window_features, steady_tv, data_span_days):
+    """Scheme A 基线对比：前7天稳态数据 = 基线，最近7天稳态数据 = 近期"""
 
-    对每个特征序列做 MK 检验 + Sen 斜率，判断是否在退化。
-    多特征融合为综合退化指数 DI。
+    MIN_BASELINE_DAYS = 7
+    now_ts = datetime.now()
 
-    Returns:
-        dict: 完整的退化分析结果
-    """
-    if len(window_features) < 20:
+    # 分窗口到基线期/近期
+    baseline_windows = []
+    recent_windows = []
+    cutoff = now_ts - timedelta(days=MIN_BASELINE_DAYS)
+    for w in window_features:
+        try:
+            w_start = datetime.strptime(w.get("start_ts", ""), "%Y-%m-%dT%H:%M:%S")
+        except (ValueError, TypeError):
+            continue
+        if w_start < cutoff:
+            baseline_windows.append(w)
+        else:
+            recent_windows.append(w)
+
+    if len(baseline_windows) < 10 or len(recent_windows) < 10:
         return {
             "features_trend": [],
             "has_trends": False,
-            "has_weak_trends": False,
-            "strong_trend_count": 0,
-            "weak_trend_count": 0,
-            "maintenance_suggestions": [],
+            "baseline_status": "insufficient_windows",
+            "baseline_msg": f"基线期窗口数 {len(baseline_windows)} 或近期窗口数 {len(recent_windows)} 不足，无法对比。",
             "window_count": len(window_features),
+            "baseline_window_count": len(baseline_windows),
+            "recent_window_count":   len(recent_windows),
         }
 
-    # ── 提取各特征序列 ──
+    # ── 特征对比 ──
     feature_names = [
-        ("mean", "mean_trend", "均值 (A)", 1),
-        ("std", "std_trend", "标准差 (A)", 2),
-        ("rms", "rms_trend", "RMS (A)", 3),
-        ("skewness", "skewness_trend", "偏度", 4),
-        ("sample_entropy", "sample_entropy_trend", "样本熵", 5),
-        ("zero_cross_rate", "zero_cross_trend", "零交叉率 (Hz)", 6),
-        ("peak_to_peak", "peak_to_peak_trend", "峰峰值 (A)", 7),
-        ("autocorr_lag10", "autocorr_decay_trend", "自相关 lag10", 8),
-        ("outlier_rate", "outlier_freq_trend", "异常点频率", 9),
+        ("mean",            "mean_trend",           "均值 (A)",            1),
+        ("std",             "std_trend",            "标准差 (A)",         2),
+        ("rms",             "rms_trend",            "RMS (A)",             3),
+        ("skewness",        "skewness_trend",       "偏度",                4),
+        ("sample_entropy",  "sample_entropy_trend", "样本熵",              5),
+        ("zero_cross_rate", "zero_cross_trend",     "零交叉率 (Hz)",      6),
+        ("peak_to_peak",   "peak_to_peak_trend",  "峰峰值 (A)",         7),
+        ("autocorr_lag10", "autocorr_decay_trend", "自相关 lag10",        8),
+        ("outlier_rate",    "outlier_freq_trend",   "异常点频率",           9),
     ]
-
-    # 均值序列单独保存 (用于加速度分析)
-    mean_series = None
 
     feature_trends = []
     for fname, di_key, label, order in feature_names:
-        series = [w[fname] for w in window_features if w.get(fname) is not None]
-        if len(series) < 20:
+        baseline_vals = [w[fname] for w in baseline_windows if w.get(fname) is not None]
+        recent_vals   = [w[fname] for w in recent_windows   if w.get(fname) is not None]
+
+        if len(baseline_vals) < 5 or len(recent_vals) < 5:
             continue
 
-        if fname == "mean":
-            mean_series = series
+        baseline_median = sorted(baseline_vals)[len(baseline_vals) // 2]
+        recent_median   = sorted(recent_vals)[len(recent_vals)   // 2]
 
-        # MK 检验
-        mk = _mann_kendall(series)
-        # Sen 斜率 (per窗口索引, 每个窗口 ≈ 1小时)
-        sen = _sen_slope(series)
-        # 估算每天窗口数
-        windows_per_day = len(window_features) / max(1, data_span_days)
-        slope_per_day = sen["slope"] * windows_per_day
+        baseline_abs = max(abs(baseline_median), 0.005)
+        change_pct = (recent_median - baseline_median) / baseline_abs * 100.0
 
-        # 对 autocorr_decay: 相关系数下降 = 退化 (所以取负斜率 sign翻转)
-        if fname == "autocorr_lag10":
-            slope_per_day = -slope_per_day
-
-        # 趋势强度: Sen斜率 / max(均值, |首窗|, 0.005) 防止接近零时畸变
-        mean_val = sum(series) / len(series)
-        baseline_val = max(abs(mean_val), abs(series[0]), 0.005)  # 选三者最大做基线
-        trend_strength = abs(slope_per_day) / baseline_val * 100.0  # 百分比
-
-        # ── 趋势判定 (三级: strong/weak/none) ──
-        # 1. MK显著 + 有方向 → strong trend
-        # 2. MK不显著但Sen斜率有意义(>弱趋势阈值) → weak trend
-        # 3. 其他 → none
-        weak_threshold_abs = WEAK_TREND_THRESHOLD_PCT_PER_DAY  # 0.15%/天
-        has_meaningful_slope = trend_strength >= weak_threshold_abs
-
-        if mk["significant"] and mk["trend"] != 0:
-            trend_level = "strong"
-            has_trend = True
-            effective_trend = mk["trend"]  # 用MK判断的方向
-            p_display = f"p={mk['p_value']:.3f}"
-        elif has_meaningful_slope and slope_per_day != 0:
-            trend_level = "weak"
-            has_trend = True
-            effective_trend = 1 if slope_per_day > 0 else -1  # 用Sen斜率判断方向
-            p_display = f"p={mk['p_value']:.3f} (弱趋势)"
-        else:
-            trend_level = "none"
-            has_trend = False
-            effective_trend = 0
-            p_display = f"p={mk['p_value']:.3f}"
-
-        # ── 关卡② 工程意义: 总绝对变化量是否超过最低门槛 ──
-        # 防止自相关等小量程特征百分比虚高（如绝对值从0.004→0.006, 相对+50%但无意义）
-        total_abs_change = abs(slope_per_day) * data_span_days
-        eng_min = ENG_MIN_TOTAL_CHANGE.get(di_key, 999)
-        eng_meaningful = has_trend and total_abs_change >= eng_min
-
-        # ── 方向判定: ↑是好事还是坏事? ──
+        # ── 方向判断 ──
         dir_type = FEATURE_DIRECTION.get(di_key, "up_bad")
-        if dir_type == "down_bad":
-            # autocorr: mk_trend < 0 才是坏方向
-            is_bad_direction = (effective_trend < 0) if has_trend else False
+        if dir_type == "abs_up_bad":
+            is_bad_direction = (abs(recent_median) > abs(baseline_median))
+        elif dir_type == "abs_down_bad":
+            is_bad_direction = (abs(recent_median) < abs(baseline_median))
+        elif dir_type == "down_bad":
+            is_bad_direction = (recent_median < baseline_median)
         else:
-            # up_bad: mk_trend > 0 是坏方向
-            is_bad_direction = (effective_trend > 0) if has_trend else False
+            is_bad_direction = (recent_median > baseline_median)
 
-        # ── 坏方向根因 + 按趋势强度分级维护建议 ──
-        _DI_ROOT_CAUSE = {
-            "mean_trend": "电流均值持续上升 → 电机负载增大或效率下降。常见根因：轴承磨损摩擦增大、绝缘老化漏电流增加、工艺负载爬升。",
-            "rms_trend": "RMS电流趋势 = 总功耗变化，与电流均值高度相关，根因分析同电流均值。",
-            "std_trend": "电流波动增大 → 运行不平稳。常见根因：机械松动（联轴器/地脚螺栓）、润滑脂老化导致轴承运转不平顺、负载间歇性波动。",
-            "sample_entropy_trend": "信号规律性下降（熵增）→ 系统随机成分增多。常见根因：轴承滚动体/滚道早期疲劳剥落、电磁系统异常谐波、转子导条缺陷。",
-            "zero_cross_trend": "高频抖动成分增多 → 信号高频段能量上升。常见根因：轴承保持架松动或滚道点蚀产生高频振动调制到电流中、电源谐波畸变率上升。",
-            "autocorr_decay_trend": "自相关性下降 → 信号\u201c记忆\u201d流失，系统动态特性变化。常见根因：转子气隙不均匀（偏心）、转子导条裂纹扩展、轴承游隙增大导致转子运动轨迹改变。",
-            "outlier_freq_trend": "异常点频率上升 → 瞬时冲击事件增多。常见根因：物料中混入硬质颗粒间歇卡滞搅拌器、齿轮啮合面点蚀、接线端子接触不良导致间歇性电流尖峰。",
-            "skewness_trend": "偏斜度变化 → 电流分布不对称加剧。常见根因：单向冲击脉冲增多（如轴承单侧剥落产生的定向冲击）、三相不平衡导致的波形畸变。",
-            "peak_to_peak_trend": "峰峰值增大 → 电流波动幅度加剧。常见根因：负载脉动增大（如搅拌器卡滞/不平衡）、电源电压波动、轴承游隙增大导致转子振动加剧调制到电流中。",
-        }
-        # ── 关卡③ 退化速度标签: 分特征查表（只有通过关卡②才进入）──
-        def _degradation_speed_label(strength_pct, di_key):
-            """分特征查表, 返回 (速度标签, CSS颜色)"""
-            if strength_pct is None:
-                return ("—", "#999")
+        # ── 工程意义检查 ──
+        abs_change = abs(recent_median - baseline_median)
+        eng_min = ENG_MIN_TOTAL_CHANGE.get(di_key, 999)
+        eng_meaningful = abs_change >= eng_min
+
+        # 趋势强度标签（必须先通过工程意义检查）
+        if not eng_meaningful:
+            speed_label = (" 暂无工程意义", "#999")
+        else:
             rapid, fast, moderate, mild = FEATURE_URGENCY_PCT.get(di_key, (10, 5, 2, 0.5))
-            if strength_pct >= rapid:
-                return ("⛔ 极速退化", "#b71c1c")
-            elif strength_pct >= fast:
-                return ("🔴 快速退化", "#d32f2f")
-            elif strength_pct >= moderate:
-                return ("🟠 中度退化", "#e65100")
-            elif strength_pct >= mild:
-                return ("🟡 轻度退化", "#f57c00")
+            abs_change_pct = abs(change_pct)
+            if abs_change_pct >= rapid:
+                speed_label = ("⛔ 极速退化", "#b71c1c")
+            elif abs_change_pct >= fast:
+                speed_label = ("🔴 快速退化", "#d32f2f")
+            elif abs_change_pct >= moderate:
+                speed_label = ("🟠 中度退化", "#e65100")
+            elif abs_change_pct >= mild:
+                speed_label = ("🟡 轻度退化", "#f57c00")
             else:
-                return (" 微小趋势", "#999")
+                speed_label = (" 微小趋势", "#999")
 
-        def _di_urgency(strength_pct, di_key):
-            """分特征查表紧急程度文案"""
-            if strength_pct is None:
-                return ("—", "#999", "趋势强度未计算。")
-            rapid, fast, moderate, mild = FEATURE_URGENCY_PCT.get(di_key, (10, 5, 2, 0.5))
-            if strength_pct >= rapid:
-                return ("⛔ 极速退化 - 立即停机检查",
-                        "#b71c1c",
-                        f"退化速度极快(≥{rapid}%/天)，继续运行存在严重故障风险。"
-                        "建议立即停机排查根因，未经检查不得恢复运行。")
-            elif strength_pct >= fast:
-                return ("🔴 快速退化 - 48小时内安排检查",
-                        "#d32f2f",
-                        f"退化加速({fast}-{rapid}%/天)，可能已进入故障加速期。"
-                        "建议48小时内安排停机检查，并提前准备所需备件。")
-            elif strength_pct >= moderate:
-                return ("🟠 中度退化 - 2周内安排检查",
-                        "#e65100",
-                        f"退化速度明显({moderate}-{fast}%/天)，不可忽视。"
-                        "建议2周内安排针对性检查（振动分析/绝缘测试/联轴器检查等）。")
-            elif strength_pct >= mild:
-                return ("🟡 轻度退化 - 纳入月度巡检",
-                        "#f57c00",
-                        f"趋势已显现但变化缓慢({mild}-{moderate}%/天)。"
-                        "建议月度巡检时重点关注该指标，持续跟踪变化率。")
-            else:
-                return ("微小趋势 - 持续观察",
-                        "#999",
-                        f"趋势变化微小(<{mild}%/天)，暂不需要维护动作。"
-                        "建议持续观察3个月，若趋势强度上升再升级处理。")
+        # 全窗口值序列（用于 DI 趋势曲线图）
+        all_window_vals = [round(w[fname], 4) for w in window_features if w.get(fname) is not None]
 
-        if is_bad_direction:
-            root_cause = _DI_ROOT_CAUSE.get(di_key, "")
-            if eng_meaningful:
-                urgency_title, urgency_color, urgency_msg = _di_urgency(trend_strength, di_key)
-                bad_direction_reason = (
-                    f"【根因】{root_cause}\n\n"
-                    f"【{urgency_title}】\n{urgency_msg}"
-                )
-            else:
-                # 趋势统计存在但绝对变化量极小, 暂无工程意义
-                bad_direction_reason = (
-                    f"【根因】{root_cause}\n\n"
-                    f"【趋势存在但绝对变化极小】\n"
-                    f"总变化量 {total_abs_change:.4f} < 最低门槛 {eng_min}，"
-                    f"当前变化量暂不具备工程意义，建议持续观察不报警。"
-                )
-        else:
-            bad_direction_reason = ""
-
-        # 最近1周 vs 前1周的变化
-        weeks_windows = min(168, len(series) // 2)
-        if len(series) >= weeks_windows * 2:
-            last_week_avg = sum(series[-weeks_windows:]) / weeks_windows
-            prev_week_avg = sum(series[-2*weeks_windows:-weeks_windows]) / weeks_windows
-            week_change = round((last_week_avg - prev_week_avg) / max(abs(prev_week_avg), 1e-9) * 100, 2)
-        else:
-            last_week_avg = sum(series[-min(24, len(series)):]) / min(24, len(series))
-            prev_week_avg = last_week_avg
-            week_change = 0.0
-
-        # 退化速度分级标签: 工程意义不足时覆盖为"暂无工程意义"
-        if eng_meaningful:
-            speed_label, speed_color = _degradation_speed_label(trend_strength, di_key)
-        else:
-            speed_label = "暂无工程意义"
-            speed_color = "#aaa"
-
-        ft = {
+        feature_trends.append({
             "name": di_key,
             "label": label,
             "order": order,
-            "mk_trend": mk["trend"],
-            "mk_p_value": mk["p_value"],
-            "mk_significant": mk["significant"],
-            "sen_slope_per_day": round(slope_per_day, 6),
-            "trend_strength_pct": round(trend_strength, 4),
-            "effective_trend": effective_trend,
-            "trend_level": trend_level,
-            "has_trend": has_trend,
+            "baseline_median": round(baseline_median, 4),
+            "recent_median":  round(recent_median,  4),
+            "change_pct":     round(change_pct, 2),
             "is_bad_direction": is_bad_direction,
-            "eng_meaningful": eng_meaningful,
-            "total_abs_change": round(total_abs_change, 5),
-            "bad_direction_reason": bad_direction_reason,
-            "direction_type": dir_type,
-            "p_display": p_display,
-            "week_change_pct": week_change,
-            "speed_label": speed_label,
-            "speed_color": speed_color,
-            "values": series,
-            "first_val": round(series[0], 4),
-            "last_val": round(series[-1], 4),
-        }
-        # total_change_pct 基于原始数值
-        d0 = ft["first_val"]
-        d1 = ft["last_val"]
-        ft["total_change_pct"] = round((d1 - d0) / max(abs(d0), 1e-9) * 100, 2)
-        feature_trends.append(ft)
+            "eng_meaningful":  eng_meaningful,
+            "has_trend":      True,
+            "speed_label":    speed_label[0],
+            "speed_color":    speed_label[1],
+            "values":         all_window_vals,
+        })
 
-    if not feature_trends:
-        return {
-            "features_trend": [],
-            "has_trends": False,
-            "has_weak_trends": False,
-            "strong_trend_count": 0,
-            "weak_trend_count": 0,
-            "maintenance_suggestions": [],
-            "window_count": len(window_features),
-        }
-
-    # ── 趋势统计 ──
-    strong_count = sum(1 for ft in feature_trends if ft["trend_level"] == "strong")
-    weak_count = sum(1 for ft in feature_trends if ft["trend_level"] == "weak")
-
-    # ── 维护建议 ──
-    has_weak_trends = weak_count > 0
-    maintenance_suggestions = _degradation_maintenance_suggestions(feature_trends)
+    suggestions = _degradation_maintenance_suggestions(feature_trends)
 
     return {
-        "features_trend": feature_trends,
-        "has_trends": strong_count > 0,
-        "has_weak_trends": has_weak_trends,
-        "strong_trend_count": strong_count,
-        "weak_trend_count": weak_count,
-        "maintenance_suggestions": maintenance_suggestions,
-        "window_count": len(window_features),
+        "features_trend":     feature_trends,
+        "has_trends":        any(ft.get("is_bad_direction") and ft.get("eng_meaningful") for ft in feature_trends),
+        "baseline_status":    "ok",
+        "baseline_msg":       "",
+        "maintenance_suggestions": suggestions,
+        "window_count":       len(window_features),
+        "baseline_window_count": len(baseline_windows),
+        "recent_window_count":   len(recent_windows),
     }
-
-
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# 数据读取
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 def read_cumulative_data(db: sqlite3.Connection, node_id: str) -> list:
     """读取累积全量历史数据（从最早记录到当前时刻）
@@ -1167,222 +1025,106 @@ def read_cumulative_data(db: sqlite3.Connection, node_id: str) -> list:
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 def analyze_motor(node_id: str, all_data: list, now: datetime) -> dict:
-    """对单台电机执行完整的 V2 预测性维护分析
+    """分析单台电机：提取稳态 → 窗口特征 → Scheme A 基线对比"""
     
-    基线策略 (累积数据):
-      - 数据 < 7 天: 前半段做基线，后半段做分析
-      - 数据 >= 7 天: 最早 30 天做基线（或最大可用），其余做分析
-      - CUSUM 在分析期内运行
-    """
     dn = display_name(node_id)
-
-    # 提取原始电流值
-    values_raw = [r["value"] for r in all_data if r["value"] is not None]
-    total_points = len(values_raw)
-
-    if total_points < 10:
+    
+    if len(all_data) < 200:
+        return {"node_id": node_id, "display_name": dn, "data_insufficient": True}
+    
+    steady_data = extract_steady_segments(all_data)
+    
+    if len(steady_data) < 500:
         return {
-            "node_id": node_id,
-            "display_name": dn,
-            "total_points": total_points,
-            "data_insufficient": True,
-            "error": f"数据点不足 ({total_points} 点)，无法进行可靠分析。至少需要 10 个数据点。",
+            "node_id": node_id, "display_name": dn, "data_insufficient": True,
+            "steady_points": len(steady_data),
         }
-
-    # ── 稳态数据提取 ──
-    # 三阶段状态机：停机→启动(10点>1A)→浪涌剔除(50点)→稳态→停机前剔除(70点)→停机(10点<1A)
-    values_steady = extract_steady_segments(all_data)
-    # 用于统计的"运行数据"用稳态数据；同时统计 1A 以上的全量运行点数
-    values_running_simple = [v for v in values_raw if v is not None and v >= STOP_CURRENT_A]
-    running_count_raw = len(values_running_simple)
-    pct_stopped = round((total_points - running_count_raw) / max(1, total_points) * 100, 1)
-
-    if not values_steady or len(values_steady) < 10:
-        return {
-            "node_id": node_id,
-            "display_name": dn,
-            "total_points": total_points,
-            "running_points": len(values_steady),
-            "pct_stopped": pct_stopped,
-            "data_insufficient": True,
-            "error": (
-                f"稳态数据不足（{len(values_steady)} 点），停机占比 {pct_stopped}%。"
-                "当前可能处于停机状态或数据积累不充分。"
-            ),
-        }
-
-    running_count = len(values_steady)
-
-    # ── 数据时间跨度 ──
-    try:
-        first_ts = datetime.fromisoformat(all_data[0]["timestamp"])
-        last_ts = datetime.fromisoformat(all_data[-1]["timestamp"])
-        data_span_days = max(1, (last_ts - first_ts).days + 1)
-    except (ValueError, TypeError, IndexError):
-        data_span_days = 1
-
-    data_sufficient = data_span_days >= 3
-
-    # ── 基线/分析拆分 ──
-    if data_span_days >= 14:
-        # 充足数据: 最早 50% 做基线
-        split = running_count // 2
-        baseline_values = values_steady[:split]
-        analysis_values = values_steady[split:]
-        baseline_source = f"前 {data_span_days // 2} 天（{len(baseline_values)} 点）"
-    elif len(values_steady) >= 100:
-        # 中等数据: 前半基线，后半分析
-        split = running_count // 2
-        baseline_values = values_steady[:split]
-        analysis_values = values_steady[split:]
-        baseline_source = f"前半段（{len(baseline_values)} 点，拆分）"
-    else:
-        # 数据少: 全部做基线，CUSUM 不可靠
-        baseline_values = values_steady
-        analysis_values = values_steady
-        baseline_source = f"全量数据（{len(baseline_values)} 点，基线不稳定）"
-
-    baseline_is_same = (baseline_values is analysis_values)
-
-    # ── 自适应基线计算 ──
-    baseline_sorted = sorted(baseline_values)
-    bl_median, bl_std, bl_kurtosis = _compute_adaptive_baseline(baseline_sorted)
-    if bl_median is None:
-        bl_median = sum(baseline_values) / len(baseline_values)
-        bl_std = 0.05 * bl_median
-        bl_kurtosis = 0.0
-
-    # ── 分析期统计 ──
-    analysis_mean = sum(analysis_values) / len(analysis_values) if analysis_values else bl_median
-    analysis_std = _pop_std(analysis_values, analysis_mean) if analysis_values else bl_std
-    current_kurtosis = _excess_kurtosis(analysis_values, analysis_mean, analysis_std)
-
-    # ── EWMA 趋势 ──
-    ewma_values = _ewma(analysis_values, lam=0.15)
-
-    # ── 累计运行时间 ──
+    
+    first_ts = datetime.strptime(steady_data[0][0].split(".")[0], "%Y-%m-%dT%H:%M:%S")
+    last_ts  = datetime.strptime(steady_data[-1][0].split(".")[0], "%Y-%m-%dT%H:%M:%S")
+    data_span_days = max(1, round((last_ts - first_ts).total_seconds() / 86400, 1))
+    
+    steady_values = [v for _, v in steady_data]
+    
+    window_features = _compute_window_features(steady_data, window_seconds=WINDOW_SECONDS)
+    
+    # 基线 vs 近期对比
+    dg = _analyze_degradation_trends(window_features, steady_data, data_span_days)
+    
+    # 计算累计运行时长和停机占比
     cumulative_hours = calc_runtime(all_data)
+    total_points = len(all_data)
+    steady_points_count = len(steady_values)
+    pct_stopped = round((total_points - steady_points_count) / max(1, total_points) * 100, 1)
 
-    # ── 电流趋势图数据（降采样到最多 500 点）──
-    chart_raw = analysis_values
-    chart_ewma = ewma_values
-    if len(chart_raw) > 500:
-        step = len(chart_raw) // 500
-        chart_raw = chart_raw[::step]
-        chart_ewma = chart_ewma[::step]
-
-    # ── 退化趋势分析 (V4 主力) ──
-    degradation = None
-    try:
-        windows = _compute_window_features(values_steady)
-        if windows and len(windows) >= 10:
-            degradation = _analyze_degradation_trends(windows, values_steady, data_span_days)
-    except Exception as e:
-        degradation = {
-            "features_trend": [], "has_trends": False,
-            "has_weak_trends": False,
-            "strong_trend_count": 0, "weak_trend_count": 0,
-            "maintenance_suggestions": [],
-            "window_count": 0, "error": str(e),
-        }
-
-    # ── 退化趋势汇总统计 ──
-    dg = degradation or {}
-    # 所有坏方向趋势 (含 eng_meaningful=False)
-    has_bad_trends = any(
-        ft.get("has_trend") and ft.get("is_bad_direction")
-        for ft in dg.get("features_trend", [])
-    )
-    # 有工程意义的坏方向趋势 (V4.7: 只有总量变足够大才算)
-    has_meaningful_trends = any(
-        ft.get("has_trend") and ft.get("is_bad_direction") and ft.get("eng_meaningful", True)
-        for ft in dg.get("features_trend", [])
-    )
+    # 从退化分析结果中提取关键指标供 HTML 使用
+    bl_median = "-"
+    bl_std = "-"
+    analysis_mean = "-"
+    analysis_std = "-"
+    baseline_source = "—"
+    bl_kurtosis = "-"
+    current_kurtosis = "-"
     worst_speed = "—"
-    worst_color = "#999"
-    worst_strength = -1
-    for ft in dg.get("features_trend", []):
-        if ft.get("has_trend") and ft.get("is_bad_direction") and ft.get("eng_meaningful", True):
-            s = ft.get("trend_strength_pct", 0)
-            if s > worst_strength:
-                worst_strength = s
-                worst_speed = ft.get("speed_label", "—")
-                worst_color = ft.get("speed_color", "#999")
+    if dg.get("baseline_status") == "ok" and dg.get("features_trend"):
+        for ft in dg["features_trend"]:
+            if ft["name"] == "mean_trend":
+                bl_median = ft.get("baseline_median", "-")
+                analysis_mean = ft.get("recent_median", "-")
+                break
+        for ft in dg["features_trend"]:
+            if ft["name"] == "std_trend":
+                bl_std = ft.get("baseline_median", "-")
+                analysis_std = ft.get("recent_median", "-")
+                break
+        baseline_source = "前7天稳态数据"
+        # 计算最坏趋势标签
+        _URGENCY_ORDER_LOCAL = ["⛔ 极速退化", "🔴 快速退化", "🟠 中度退化", "🟡 轻度退化"]
+        for ft in dg["features_trend"]:
+            if ft.get("is_bad_direction") and ft.get("eng_meaningful"):
+                if ft.get("speed_label") in _URGENCY_ORDER_LOCAL:
+                    worst_speed = ft.get("speed_label")
+                    break
+
+    # 准备图表数据 (稳态数据降采样)
+    step = max(1, len(steady_data) // 2000)
+    chart_raw = [{"t": ts, "v": v} for ts, v in steady_data[::step][:2000]]
+
+    # EWMA 平滑 (λ=0.15)
+    ewma_alpha = 0.15
+    chart_ewma = []
+    if chart_raw:
+        e = chart_raw[0]["v"]
+        for item in chart_raw:
+            e = ewma_alpha * item["v"] + (1 - ewma_alpha) * e
+            chart_ewma.append({"t": item["t"], "v": round(e, 4)})
 
     return {
         "node_id": node_id,
         "display_name": dn,
-        "total_points": total_points,
-        "running_points": running_count,
-        "pct_stopped": pct_stopped,
+        "data_insufficient": False,
+        "steady_points": steady_points_count,
+        "running_points": steady_points_count,  # 兼容 HTML 模板
+        "data_start": steady_data[0][0],
+        "data_end":   steady_data[-1][0],
         "data_span_days": data_span_days,
-        "data_sufficient": data_sufficient,
-        "baseline_source": baseline_source,
         "cumulative_hours": round(cumulative_hours, 1),
-        "bl_median": round(bl_median, 2),
-        "bl_std": round(bl_std, 3),
-        "bl_kurtosis": round(bl_kurtosis, 3),
-        "analysis_mean": round(analysis_mean, 2),
-        "analysis_std": round(analysis_std, 3),
-        "current_kurtosis": round(current_kurtosis, 3),
+        "pct_stopped": pct_stopped,
+        "bl_median": bl_median,
+        "bl_std": bl_std,
+        "analysis_mean": analysis_mean,
+        "analysis_std": analysis_std,
+        "baseline_source": baseline_source,
+        "bl_kurtosis": bl_kurtosis,
+        "current_kurtosis": current_kurtosis,
+        "worst_speed": worst_speed,
         "chart_raw": chart_raw,
         "chart_ewma": chart_ewma,
-        "degradation": degradation,
-        "has_bad_trends": has_bad_trends,
-        "has_meaningful_trends": has_meaningful_trends,
-        "worst_speed": worst_speed,
-        "worst_color": worst_color,
-        "strong_trend_count": dg.get("strong_trend_count", 0),
-        "weak_trend_count": dg.get("weak_trend_count", 0),
+        "window_count": dg.get("window_count", 0),
+        "baseline_status": dg.get("baseline_status", "unknown"),
+        "baseline_msg":    dg.get("baseline_msg", ""),
+        "degradation": dg,
     }
-
-
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# HTML 报告生成
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-CSS = """
-* { margin:0; padding:0; box-sizing:border-box; }
-body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-       background: #f5f7fa; color: #333; line-height:1.6; }
-.container { max-width:1200px; margin:0 auto; padding:20px; }
-.header { background: linear-gradient(135deg, #1a237e, #283593); color: white;
-          border-radius:12px; padding:30px; margin-bottom:24px; }
-.header h1 { font-size:24px; margin-bottom:8px; }
-.header .sub { opacity:0.85; font-size:14px; margin-bottom:4px; }
-.summary-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(140px,1fr));
-                gap:12px; margin-bottom:24px; }
-.summary-card { background:white; border-radius:10px; padding:16px;
-                box-shadow:0 1px 3px rgba(0,0,0,0.08); text-align:center; }
-.summary-card .num { font-size:28px; font-weight:700; }
-.summary-card .lbl { font-size:12px; color:#666; margin-top:4px; }
-.trend-summary { background:white; border-radius:12px; padding:20px 24px;
-                 box-shadow:0 1px 3px rgba(0,0,0,0.08); margin-bottom:24px; }
-.motor-section { background:white; border-radius:10px; margin-bottom:20px;
-                 box-shadow:0 1px 3px rgba(0,0,0,0.08); overflow:hidden; }
-.motor-header { padding:18px 24px; display:flex; align-items:center;
-                justify-content:space-between; border-bottom:1px solid #eee; }
-.motor-header h2 { font-size:18px; }
-.motor-body { padding:20px 24px; }
-.chart-row { display:grid; grid-template-columns:1fr; gap:16px; margin-bottom:16px; }
-.chart-box { background:#fafafa; border-radius:8px; padding:12px; position:relative;
-             height:280px; }
-.chart-box h4 { font-size:13px; color:#555; margin-bottom:8px; }
-.key-indicators { display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr));
-                  gap:8px; margin-bottom:20px; }
-.ki-card { background:#f8f9fa; border-radius:8px; padding:10px 14px; }
-.ki-card .ki-val { font-size:18px; font-weight:700; color:#37474f; }
-.ki-card .ki-lbl { font-size:11px; color:#888; margin-top:2px; }
-.footer { text-align:center; color:#999; font-size:12px; padding:20px; }
-h3 { font-size:16px; margin-bottom:12px; color:#37474f; }
-/* V4 — 退化趋势分析面板 */
-.degradation-feature-card { background:#f8f9fa; border-radius:8px; padding:14px;
-                            margin-bottom:8px; border-left:3px solid #ccc; }
-.degradation-feature-card.trend-bad { border-left-color:#c62828; background:#fff5f5; }
-.degradation-feature-card.trend-good { border-left-color:#2e7d32; background:#f1f8e9; }
-.feature-trend-header { display:flex; justify-content:space-between; align-items:center; margin-bottom:8px; }
-.feature-trend-header .ft-name { font-size:13px; font-weight:600; }
-"""
 
 def generate_html_report(results: list, period_desc: str, generated_at: str,
                           data_start: str, data_end: str) -> str:
@@ -1411,6 +1153,41 @@ def generate_html_report(results: list, period_desc: str, generated_at: str,
 
     total_alert = motors_with_trends  # 有退化趋势的电机总数
 
+    # ── CSS 样式定义 ──
+    CSS = """
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: 'Segoe UI', 'Microsoft YaHei', sans-serif; background: #0d1117; color: #c9d1d9; padding: 20px; }
+    .container { max-width: 1400px; margin: 0 auto; }
+    .header { text-align: center; padding: 30px; background: linear-gradient(135deg, #161b22, #1c2333); border-radius: 12px; margin-bottom: 30px; border: 1px solid #30363d; }
+    .header h1 { color: #58a6ff; font-size: 28px; margin-bottom: 10px; }
+    .header .sub { color: #8b949e; font-size: 14px; margin: 5px 0; }
+    .summary-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; margin-bottom: 30px; }
+    .summary-card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 20px; text-align: center; }
+    .summary-card .num { font-size: 36px; font-weight: bold; color: #58a6ff; }
+    .summary-card .lbl { font-size: 14px; color: #8b949e; margin-top: 5px; }
+    .motor-section { background: #161b22; border: 1px solid #30363d; border-radius: 12px; padding: 25px; margin-bottom: 30px; }
+    .motor-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; padding-bottom: 15px; border-bottom: 1px solid #30363d; }
+    .motor-name { font-size: 20px; font-weight: bold; color: #58a6ff; }
+    .motor-status { padding: 5px 15px; border-radius: 20px; font-size: 14px; font-weight: bold; }
+    .status-ok { background: #0d2818; color: #3fb950; border: 1px solid #238636; }
+    .status-warning { background: #2d2100; color: #d29922; border: 1px solid #bb8009; }
+    .status-alert { background: #3d1117; color: #f85149; border: 1px solid #da3633; }
+    .feature-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 15px; margin: 20px 0; }
+    .feature-card { background: #0d1117; border: 1px solid #30363d; border-radius: 8px; padding: 15px; }
+    .feature-card h4 { font-size: 14px; color: #8b949e; margin-bottom: 10px; }
+    .feature-value { font-size: 24px; font-weight: bold; margin: 5px 0; }
+    .trend-good { color: #3fb950; }
+    .trend-bad { color: #f85149; }
+    .trend-neutral { color: #8b949e; }
+    .maintenance-section { background: #0d1117; border: 1px solid #30363d; border-radius: 8px; padding: 20px; margin-top: 20px; }
+    .maintenance-section h3 { color: #d29922; margin-bottom: 15px; }
+    .maintenance-list { list-style: none; }
+    .maintenance-list li { padding: 8px 0; border-bottom: 1px solid #21262d; color: #c9d1d9; }
+    .maintenance-list li:last-child { border-bottom: none; }
+    .chart-container { background: #0d1117; border: 1px solid #30363d; border-radius: 8px; padding: 15px; margin: 20px 0; height: 300px; }
+    .no-data { text-align: center; padding: 40px; color: #8b949e; font-style: italic; }
+    """
+    
     html = f"""<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -1684,14 +1461,14 @@ Object.keys(data).forEach(name => {{
         datasets: [
           {{
             label: '稳态运行电流 (A)',
-            data: d.raw,
+            data: d.raw.map(p => p.v),
             borderColor: '#90caf9',
             backgroundColor: 'transparent',
             borderWidth: 0.5, pointRadius: 0,
           }},
           {{
             label: 'EWMA (λ=0.15)',
-            data: d.ewma,
+            data: d.ewma.map(p => p.v),
             borderColor: '#e65100',
             borderWidth: 2, pointRadius: 0,
           }},
@@ -1838,7 +1615,7 @@ def main():
             meaningful = result.get("has_meaningful_trends", False)
             flag = "⚠" if meaningful else ("?" if bad else "✓")
             degrade_text = "是" if meaningful else ("(统计趋势,乏工程意义)" if bad else "否")
-            print(f"{flag} 运行 {result['running_points']} 点 | "
+            print(f"{flag} 运行 {result.get('steady_points', result.get('running_points', '?'))} 点 | "
                   f"趋势: {strong}强{weak}弱 | 退化: {degrade_text}")
 
     db.close()
