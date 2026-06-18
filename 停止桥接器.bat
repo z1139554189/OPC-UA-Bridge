@@ -1,11 +1,5 @@
 @echo off
-echo ============================================
-echo    OPC UA Bridge - 停止桥接器
-echo ============================================
+echo Stopping OPCUABridge...
 net stop OPCUABridge
-if %errorlevel%==0 (
-    echo [+] 桥接器: 已停止
-) else (
-    echo [-] 桥接器: 可能已停止或无法响应
-)
+if %errorlevel%==0 (echo [OK] OPCUABridge stopped) else (echo [SKIP] already stopped)
 pause

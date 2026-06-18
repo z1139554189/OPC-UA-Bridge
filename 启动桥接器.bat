@@ -1,11 +1,5 @@
 @echo off
-echo ============================================
-echo    OPC UA Bridge - 启动桥接器
-echo ============================================
+echo Starting OPCUABridge...
 net start OPCUABridge
-if %errorlevel%==0 (
-    echo [+] 桥接器: 已启动
-) else (
-    echo [-] 桥接器: 可能已在运行
-)
+if errorlevel 1 (echo [SKIP] OPCUABridge already running) else (echo [OK] OPCUABridge started)
 pause
