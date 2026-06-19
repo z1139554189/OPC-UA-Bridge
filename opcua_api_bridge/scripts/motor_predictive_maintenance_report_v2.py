@@ -130,7 +130,7 @@ FEATURE_URGENCY_PCT = {
 def _degradation_maintenance_suggestions(feature_trends):
     """根据退化特征生成维护建议 (V4.7: 仅轻度及以上退化才生成建议)"""
 
-    _SKIP_LABELS = {" 暂无工程意义", " 微小趋势"}
+    _SKIP_LABELS = {"暂无工程意义", "微小趋势"}
     # 轻度及以上 → 需要维护建议的 action 文案
     _ACTION_MAP = {
         "⛔ 极速退化": "立即停机检查，未经检查不得恢复运行",
@@ -934,7 +934,7 @@ def _analyze_degradation_trends(window_features, steady_tv, data_span_days):
 
         # 趋势强度标签（必须先通过工程意义检查）
         if not eng_meaningful:
-            speed_label = (" 暂无工程意义", "#999")
+            speed_label = ("暂无工程意义", "#999")
         else:
             rapid, fast, moderate, mild = FEATURE_URGENCY_PCT.get(di_key, (10, 5, 2, 0.5))
             abs_change_pct = abs(change_pct)
@@ -947,7 +947,7 @@ def _analyze_degradation_trends(window_features, steady_tv, data_span_days):
             elif abs_change_pct >= mild:
                 speed_label = ("🟡 轻度退化", "#f57c00")
             else:
-                speed_label = (" 微小趋势", "#999")
+                speed_label = ("微小趋势", "#999")
 
         # 全窗口值序列（用于 DI 趋势曲线图）
         all_window_vals = [round(w[fname], 4) for w in window_features if w.get(fname) is not None]
@@ -1188,10 +1188,10 @@ def generate_html_report(results: list, period_desc: str, generated_at: str,
     .ki-card { background: #0d1117; border: 1px solid #30363d; border-radius: 8px; padding: 14px 16px; text-align: center; }
     .ki-val { font-size: 22px; font-weight: 700; color: #e6edf3; }
     .ki-lbl { font-size: 12px; color: #8b949e; margin-top: 4px; }
-    .degredation-feature-card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 14px; margin-bottom: 8px; }
-    .degredation-feature-card.trend-bad { border-left: 3px solid #f85149; }
-    .degredation-feature-card.trend-good { border-left: 3px solid #3fb950; }
-    .degredation-feature-card.trend-neutral { border-left: 3px solid #8b949e; }
+    .degradation-feature-card { background: #161b22; border-radius: 8px; padding: 14px; margin-bottom: 8px; }
+    .degradation-feature-card.trend-bad { border: 1px solid #f85149; border-left: 3px solid #f85149; }
+    .degradation-feature-card.trend-good { border: 1px solid #3fb950; border-left: 3px solid #3fb950; }
+    .degradation-feature-card.trend-neutral { border: 1px solid #8b949e; border-left: 3px solid #8b949e; }
     .feature-trend-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
     .chart-row { margin: 16px 0; }
     .chart-box { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 12px 16px; }
@@ -1360,7 +1360,7 @@ def generate_html_report(results: list, period_desc: str, generated_at: str,
                     eng_note = f' <span style="font-size:10px;color:#666;">(总变{total_abs:.4f})</span>'
 
                 html += f"""
-    <div class="degradation-feature-card {trend_cls}">
+    <div class="degradation-feature-card {trend_cls}" style="border-color: {speed_color};">
       <div class="feature-trend-header">
         <span class="ft-name">{ft['label']}</span>
         {speed_html}
