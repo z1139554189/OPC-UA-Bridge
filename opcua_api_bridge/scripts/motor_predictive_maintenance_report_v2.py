@@ -984,8 +984,8 @@ def _analyze_degradation_trends(window_features, steady_tv, data_span_days):
             else:
                 speed_label = ("微小趋势", "#999")
 
-        # 全窗口值序列（用于 DI 趋势曲线图）
-        all_window_vals = [round(w[fname], 4) for w in window_features if w.get(fname) is not None]
+        # 分析期窗口值序列（仅用于 DI 趋势曲线图，不含基线期前7天）
+        all_window_vals = [round(w[fname], 4) for w in recent_windows if w.get(fname) is not None]
         _slope_result = _sen_slope(all_window_vals) if len(all_window_vals) >= 10 else {"slope": 0.0}
         sen_slope_per_day = _slope_result["slope"]
         first_val = all_window_vals[0] if all_window_vals else 0.0
