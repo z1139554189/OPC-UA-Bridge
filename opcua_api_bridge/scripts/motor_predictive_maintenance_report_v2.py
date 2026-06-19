@@ -20,7 +20,6 @@ import json
 import math
 import os
 import sqlite3
-import sys
 import re
 from collections import defaultdict
 from datetime import datetime, timedelta
@@ -787,25 +786,26 @@ def _compute_window_features(steady_data, window_seconds=WINDOW_SECONDS):
 
     Args:
         steady_data: 稳态数据，支持多种格式：
-                      - [float, ...]          纯数值列表
-                      - [(ts,v), ...]       (时间戳,值) 元组列表
-                      - [{"timestamp":, "value":}, ...]  dict列表
+                      - [(ts,v), ...]       (时间戳,值) 元组列表（推荐，会记录start_ts）
+                      - [float, ...]          纯数值列表（无时间戳）
         window_seconds: 窗口时长(秒), 默认3600
 
     Returns:
-        list[dict]: 每个窗口的特征字典, 按时间顺序排列
+        list[dict]: 每个窗口的特征字典, 按时间顺序排列, 包含 start_ts 字段
     """
     if not steady_data:
         return []
 
-    # 统一转为纯数值列表
-    first = steady_data[0]
-    if isinstance(first, dict):
-        vals = [d["value"] for d in steady_data]
-    elif isinstance(first, (tuple, list)) and len(first) >= 2:
+    # 判断输入格式，保留时间戳
+    has_timestamp = False
+    if isinstance(steady_data[0], (tuple, list)) and len(steady_data[0]) >= 2:
+        has_timestamp = True
+        timestamps = [ts for ts, _ in steady_data]
         vals = [v for _, v in steady_data]
     else:
-        vals = list(steady_data)   # 已经是纯数值列表
+        has_timestamp = False
+        vals = list(steady_data)
+        timestamps = None
 
     wp = max(WINDOW_MIN_POINTS, window_seconds)
 
@@ -849,10 +849,19 @@ def _compute_window_features(steady_data, window_seconds=WINDOW_SECONDS):
         else:
             ac_lag10 = 0.0
 
+        # 记录窗口起始时间戳
+        if has_timestamp and timestamps:
+            # start 是数值索引，需要找到对应的时间戳
+            ts_idx = min(start, len(timestamps) - 1)
+            start_ts = timestamps[ts_idx]
+        else:
+            start_ts = None
+
         features = {
             "start_idx": start,
             "end_idx": end,
             "n_points": n,
+            "start_ts": start_ts,
             "mean": round(mean_v, 4),
             "std": round(std_v, 4),
             "rms": round(rms_v, 4),
@@ -869,9 +878,12 @@ def _compute_window_features(steady_data, window_seconds=WINDOW_SECONDS):
     return windows
 
 def _analyze_degradation_trends(window_features, steady_tv, data_span_days):
-    """Scheme A 基线对比：前50%窗口 = 基线，后50%窗口 = 近期（不依赖时间戳）"""
+    """Scheme A 基线对比：前7天 = 基线，后7天 = 分析期"""
 
     n_total = len(window_features)
+    # 调试：检查 start_ts 情况
+    import sys
+    sts = [w.get("start_ts") for w in window_features[:5]]
     if n_total < 20:
         return {
             "features_trend": [],
@@ -883,10 +895,45 @@ def _analyze_degradation_trends(window_features, steady_tv, data_span_days):
             "recent_window_count":   0,
         }
 
-    # 按窗口索引对半分：前50% = 基线，后50% = 近期
-    split = n_total // 2
-    baseline_windows = window_features[:split]
-    recent_windows   = window_features[split:]
+    # 按时间戳分割：前7天稳态数据 = 基线，之后所有数据 = 分析期
+    if window_features and window_features[0].get("start_ts"):
+        from datetime import datetime, timedelta
+        # 解析所有窗口的 start_ts，找数据时间范围
+        parsed = []
+        for w in window_features:
+            ts_raw = w.get("start_ts")
+            if ts_raw:
+                try:
+                    if isinstance(ts_raw, str):
+                        ts = datetime.fromisoformat(ts_raw)
+                    else:
+                        ts = ts_raw
+                    parsed.append((ts, w))
+                except (ValueError, TypeError):
+                    pass
+        if parsed:
+            parsed.sort(key=lambda x: x[0])
+            earliest_ts = parsed[0][0]
+            cutoff_ts = earliest_ts + timedelta(days=7)
+
+            baseline_windows = [w for ts, w in parsed if ts < cutoff_ts]
+            recent_windows   = [w for ts, w in parsed if ts >= cutoff_ts]
+
+            # 如果近期窗口不足，把基线期的后半段也纳入分析
+            if len(recent_windows) < 10 and len(parsed) > 20:
+                mid = len(parsed) // 2
+                baseline_windows = [w for _, w in parsed[:mid]]
+                recent_windows   = [w for _, w in parsed[mid:]]
+        else:
+            # start_ts 解析失败，降级为按索引对半分
+            split = n_total // 2
+            baseline_windows = window_features[:split]
+            recent_windows   = window_features[split:]
+    else:
+        # 无时间戳：按索引对半分（降级处理）
+        split = n_total // 2
+        baseline_windows = window_features[:split]
+        recent_windows   = window_features[split:]
 
     # ── 特征对比 ──
     feature_names = [
@@ -1294,7 +1341,7 @@ def generate_html_report(results: list, period_desc: str, generated_at: str,
   <div class="ki-card"><div class="ki-val">{r['current_kurtosis']}</div><div class="ki-lbl">当前峭度（基线={r.get('bl_kurtosis', '-')}）</div></div>
   <div class="ki-card"><div class="ki-val">{r['cumulative_hours']} h</div><div class="ki-lbl">累计运行时间</div></div>
   <div class="ki-card"><div class="ki-val">{r['running_points']}</div><div class="ki-lbl">稳态数据点</div></div>
-  <div class="ki-card"><div class="ki-val">{r.get("degradation", {}).get("window_count", "-") if r.get("degradation") else "-"}</div><div class="ki-lbl">分析窗口数</div></div>
+  <div class="ki-card"><div class="ki-val">{r.get("degradation", {}).get("recent_window_count", "-") if r.get("degradation") else "-"}</div><div class="ki-lbl">分析窗口数</div></div>
 </div>
 
 <!-- 稳态电流趋势图 -->
