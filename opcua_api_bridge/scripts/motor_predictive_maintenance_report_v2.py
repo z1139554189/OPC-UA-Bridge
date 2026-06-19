@@ -782,32 +782,40 @@ def _sen_slope(values):
         return {"slope": (slopes[mid - 1] + slopes[mid]) / 2.0}
 
 
-def _compute_window_features(steady_tv, window_seconds=WINDOW_SECONDS):
-    """
-    将稳态数据按时长窗口分段，每窗口计算10个特征。
+def _compute_window_features(steady_data, window_seconds=WINDOW_SECONDS):
+    """将稳态数据按时长窗口分段，每窗口计算10个特征。
 
     Args:
-        steady_tv: 稳态电流值列表 (按时间顺序)
+        steady_data: 稳态数据，支持多种格式：
+                      - [float, ...]          纯数值列表
+                      - [(ts,v), ...]       (时间戳,值) 元组列表
+                      - [{"timestamp":, "value":}, ...]  dict列表
         window_seconds: 窗口时长(秒), 默认3600
 
     Returns:
         list[dict]: 每个窗口的特征字典, 按时间顺序排列
     """
-    # Extract values from (timestamp, value) tuples if needed
-    if steady_tv and isinstance(steady_tv[0], tuple):
-        steady_tv = [v for _, v in steady_tv]
-    
-    wp = max(WINDOW_MIN_POINTS, window_seconds)  # 最少1小时=3600点
-    if window_seconds < wp:
-        wp = window_seconds
+    if not steady_data:
+        return []
+
+    # 统一转为纯数值列表
+    first = steady_data[0]
+    if isinstance(first, dict):
+        vals = [d["value"] for d in steady_data]
+    elif isinstance(first, (tuple, list)) and len(first) >= 2:
+        vals = [v for _, v in steady_data]
+    else:
+        vals = list(steady_data)   # 已经是纯数值列表
+
+    wp = max(WINDOW_MIN_POINTS, window_seconds)
 
     windows = []
     start = 0
-    total = len(steady_tv)
+    total = len(vals)
 
     while start < total:
         end = min(start + wp, total)
-        chunk = steady_tv[start:end]
+        chunk = vals[start:end]
 
         if len(chunk) < WINDOW_MIN_POINTS:
             start = end
@@ -816,33 +824,25 @@ def _compute_window_features(steady_tv, window_seconds=WINDOW_SECONDS):
         # 基础统计
         n = len(chunk)
         mean_v = sum(chunk) / n
-        # 标准差
         variance = sum((v - mean_v) ** 2 for v in chunk) / n
         std_v = math.sqrt(max(variance, 1e-12))
-        # RMS
         rms_v = math.sqrt(sum(v ** 2 for v in chunk) / n)
-        # 偏度
         if std_v > 1e-9:
             skew_num = sum((v - mean_v) ** 3 for v in chunk) / n
             skew_v = skew_num / (std_v ** 3)
         else:
             skew_v = 0.0
-        # 峰峰值
         p2p = max(chunk) - min(chunk)
-        # 异常点频率 (偏离均值 > 3sigma 的点 — 标准统计异常定义)
         threshold_3s = 3.0 * max(std_v, 0.01)
         outlier_count = sum(1 for v in chunk if abs(v - mean_v) > threshold_3s)
         outlier_rate = outlier_count / n
-        # 零交叉率
         zcr = _zero_crossing_rate(chunk, mean_v)
-        # 样本熵 (窗口内均匀采样至500点, 避免取前500点引入的时间偏差)
         if len(chunk) > 500:
-            step = len(chunk) / 500
-            samp_vals = [chunk[int(i * step)] for i in range(500)]
+            step_s = len(chunk) / 500
+            samp_vals = [chunk[int(i * step_s)] for i in range(500)]
         else:
             samp_vals = chunk
         entropy = _sample_entropy(samp_vals)
-        # 自相关 (lag=10 的系数)
         if n >= 20:
             auto_corr = _auto_correlation(chunk, max_lag=10)
             ac_lag10 = auto_corr.get(10, 0.0)
@@ -868,37 +868,25 @@ def _compute_window_features(steady_tv, window_seconds=WINDOW_SECONDS):
 
     return windows
 
-
 def _analyze_degradation_trends(window_features, steady_tv, data_span_days):
-    """Scheme A 基线对比：前7天稳态数据 = 基线，最近7天稳态数据 = 近期"""
+    """Scheme A 基线对比：前50%窗口 = 基线，后50%窗口 = 近期（不依赖时间戳）"""
 
-    MIN_BASELINE_DAYS = 7
-    now_ts = datetime.now()
-
-    # 分窗口到基线期/近期
-    baseline_windows = []
-    recent_windows = []
-    cutoff = now_ts - timedelta(days=MIN_BASELINE_DAYS)
-    for w in window_features:
-        try:
-            w_start = datetime.strptime(w.get("start_ts", ""), "%Y-%m-%dT%H:%M:%S")
-        except (ValueError, TypeError):
-            continue
-        if w_start < cutoff:
-            baseline_windows.append(w)
-        else:
-            recent_windows.append(w)
-
-    if len(baseline_windows) < 10 or len(recent_windows) < 10:
+    n_total = len(window_features)
+    if n_total < 20:
         return {
             "features_trend": [],
             "has_trends": False,
             "baseline_status": "insufficient_windows",
-            "baseline_msg": f"基线期窗口数 {len(baseline_windows)} 或近期窗口数 {len(recent_windows)} 不足，无法对比。",
-            "window_count": len(window_features),
-            "baseline_window_count": len(baseline_windows),
-            "recent_window_count":   len(recent_windows),
+            "baseline_msg": f"总窗口数 {n_total} 不足（需≥20），无法对比。",
+            "window_count": n_total,
+            "baseline_window_count": 0,
+            "recent_window_count":   0,
         }
+
+    # 按窗口索引对半分：前50% = 基线，后50% = 近期
+    split = n_total // 2
+    baseline_windows = window_features[:split]
+    recent_windows   = window_features[split:]
 
     # ── 特征对比 ──
     feature_names = [
@@ -926,6 +914,7 @@ def _analyze_degradation_trends(window_features, steady_tv, data_span_days):
 
         baseline_abs = max(abs(baseline_median), 0.005)
         change_pct = (recent_median - baseline_median) / baseline_abs * 100.0
+        trend_strength_pct = abs(change_pct) / max(1, data_span_days)
 
         # ── 方向判断 ──
         dir_type = FEATURE_DIRECTION.get(di_key, "up_bad")
@@ -962,6 +951,11 @@ def _analyze_degradation_trends(window_features, steady_tv, data_span_days):
 
         # 全窗口值序列（用于 DI 趋势曲线图）
         all_window_vals = [round(w[fname], 4) for w in window_features if w.get(fname) is not None]
+        _slope_result = _sen_slope(all_window_vals) if len(all_window_vals) >= 10 else {"slope": 0.0}
+        sen_slope_per_day = _slope_result["slope"]
+        first_val = all_window_vals[0] if all_window_vals else 0.0
+        last_val  = all_window_vals[-1] if all_window_vals else 0.0
+        total_change_pct = (last_val - first_val) / max(abs(first_val), 0.005) * 100.0
 
         feature_trends.append({
             "name": di_key,
@@ -970,11 +964,17 @@ def _analyze_degradation_trends(window_features, steady_tv, data_span_days):
             "baseline_median": round(baseline_median, 4),
             "recent_median":  round(recent_median,  4),
             "change_pct":     round(change_pct, 2),
+            "trend_strength_pct": round(trend_strength_pct, 2),
+            "sen_slope_per_day":  round(sen_slope_per_day, 6),
             "is_bad_direction": is_bad_direction,
             "eng_meaningful":  eng_meaningful,
             "has_trend":      True,
             "speed_label":    speed_label[0],
             "speed_color":    speed_label[1],
+            "effective_trend": speed_label[0] if eng_meaningful else "",
+            "first_val":       round(first_val, 4),
+            "last_val":        round(last_val, 4),
+            "total_change_pct": round(total_change_pct, 2),
             "values":         all_window_vals,
         })
 
@@ -1066,8 +1066,8 @@ def analyze_motor(node_id: str, all_data: list, now: datetime) -> dict:
     bl_kurtosis = "-"
     current_kurtosis = "-"
     worst_speed = "—"
-    if dg.get("baseline_status") == "ok" and dg.get("features_trend"):
-        for ft in dg["features_trend"]:
+    if dg.get("baseline_status") == "ok":
+        for ft in (dg.get("features_trend") or []):
             if ft["name"] == "mean_trend":
                 bl_median = ft.get("baseline_median", "-")
                 analysis_mean = ft.get("recent_median", "-")
@@ -1184,7 +1184,19 @@ def generate_html_report(results: list, period_desc: str, generated_at: str,
     .maintenance-list { list-style: none; }
     .maintenance-list li { padding: 8px 0; border-bottom: 1px solid #21262d; color: #c9d1d9; }
     .maintenance-list li:last-child { border-bottom: none; }
-    .chart-container { background: #0d1117; border: 1px solid #30363d; border-radius: 8px; padding: 15px; margin: 20px 0; height: 300px; }
+    .key-indicators { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; margin: 16px 0; }
+    .ki-card { background: #0d1117; border: 1px solid #30363d; border-radius: 8px; padding: 14px 16px; text-align: center; }
+    .ki-val { font-size: 22px; font-weight: 700; color: #e6edf3; }
+    .ki-lbl { font-size: 12px; color: #8b949e; margin-top: 4px; }
+    .degredation-feature-card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 14px; margin-bottom: 8px; }
+    .degredation-feature-card.trend-bad { border-left: 3px solid #f85149; }
+    .degredation-feature-card.trend-good { border-left: 3px solid #3fb950; }
+    .degredation-feature-card.trend-neutral { border-left: 3px solid #8b949e; }
+    .feature-trend-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+    .chart-row { margin: 16px 0; }
+    .chart-box { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 12px 16px; }
+    .chart-box h4 { font-size: 13px; color: #8b949e; margin-bottom: 10px; }
+    .chart-box canvas { display: block; width: 100% !important; height: 280px !important; }
     .no-data { text-align: center; padding: 40px; color: #8b949e; font-style: italic; }
     """
     
