@@ -1077,20 +1077,37 @@ def analyze_motor(node_id: str, all_data: list, now: datetime) -> dict:
     dn = display_name(node_id)
     
     if len(all_data) < 200:
-        return {"node_id": node_id, "display_name": dn, "data_insufficient": True}
+        return {
+            "node_id": node_id, "display_name": dn,
+            "data_insufficient": True,
+            "insufficient_reason": "总数据点数不足（< 200），无法提取稳态段",
+            "steady_points": 0,
+        }
     
     steady_data = extract_steady_segments(all_data)
     
     if len(steady_data) < 500:
         return {
-            "node_id": node_id, "display_name": dn, "data_insufficient": True,
+            "node_id": node_id, "display_name": dn,
+            "data_insufficient": True,
+            "insufficient_reason": f"稳态数据仅{len(steady_data)}点，需至少500点",
             "steady_points": len(steady_data),
         }
     
     first_ts = datetime.strptime(steady_data[0][0].split(".")[0], "%Y-%m-%dT%H:%M:%S")
     last_ts  = datetime.strptime(steady_data[-1][0].split(".")[0], "%Y-%m-%dT%H:%M:%S")
     data_span_days = max(1, round((last_ts - first_ts).total_seconds() / 86400, 1))
-    
+
+    # 方案A：稳态数据不足7天，不分析
+    if data_span_days < 7:
+        return {
+            "node_id": node_id, "display_name": dn,
+            "data_insufficient": True,
+            "insufficient_reason": f"稳态数据仅{data_span_days}天，需积累7天以上稳态数据",
+            "data_span_days": data_span_days,
+            "steady_points": len(steady_data),
+        }
+
     steady_values = [v for _, v in steady_data]
     
     window_features = _compute_window_features(steady_data, window_seconds=WINDOW_SECONDS)
@@ -1311,11 +1328,22 @@ def generate_html_report(results: list, period_desc: str, generated_at: str,
     for i, r in enumerate(results):
         dn = r.get("display_name", "?")
         if r.get("data_insufficient"):
+            reason = r.get("insufficient_reason", "稳态数据不足，无法进行分析")
+            steady_pts = r.get("steady_points", 0)
+            span_days = r.get("data_span_days", 0)
             html += (
                 f'<div class="motor-section">'
                 f'<div class="motor-header"><h2>{dn}</h2>'
-                f'<span style="color:#999">数据不足</span></div>'
-                f'<div class="motor-body"><p style="color:#999">{r.get("error","")}</p></div>'
+                f'<span style="color:#f85149;font-weight:600;">⚠ 数据不足</span></div>'
+                f'<div class="motor-body">'
+                f'<div style="padding:20px;background:#1a1a2e;border-radius:8px;text-align:center;">'
+                f'<p style="color:#ff8c00;font-size:15px;margin-bottom:8px;">{reason}</p>'
+                f'<p style="color:#8b949e;font-size:13px;">'
+                f'当前稳态数据：{steady_pts} 点 / {span_days} 天<br>'
+                f'需至少 7 天稳态数据（约 168 个分析窗口）才能生成可靠基线'
+                f'</p>'
+                f'</div>'
+                f'</div>'
                 f'</div>'
             )
             continue
