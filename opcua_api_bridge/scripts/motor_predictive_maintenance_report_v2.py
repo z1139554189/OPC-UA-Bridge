@@ -526,19 +526,7 @@ def calc_runtime(data_all):
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# 自适应基线
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-def _compute_adaptive_baseline(values_sorted):
-    """从运行数据自适应计算基线"""
-    if not values_sorted or len(values_sorted) < 10:
-        return None, None, None
-    median_val = _median(values_sorted)
-    mean_val = sum(values_sorted) / len(values_sorted)
-    std_val = _pop_std(values_sorted, mean_val)
-    kurt_val = _excess_kurtosis(values_sorted, mean_val, std_val)
-    return median_val, std_val, kurt_val
-
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # V3 — 退化趋势分析核心算法
@@ -1560,7 +1548,7 @@ Object.keys(data).forEach(name => {{
             borderWidth: 2, pointRadius: 0,
           }},
           {{
-            label: '自适应基线 (中位数)',
+            label: '基线电流 (前7天)',
             data: Array(d.raw.length).fill(d.bl_median),
             borderColor: '#2e7d32',
             borderWidth: 1.5, borderDash: [6,3], pointRadius: 0,
