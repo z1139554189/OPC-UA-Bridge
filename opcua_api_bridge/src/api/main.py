@@ -53,7 +53,7 @@ security = HTTPBearer()
 # JWT 配置（生产环境请用环境变量存储 SECRET_KEY）
 JWT_SECRET_KEY = os.environ.get("JWT_SECRET_KEY", "opcua-bridge-secret-key-2026-change-in-prod")
 JWT_ALGORITHM = "HS256"
-JWT_EXPIRE_MINUTES = 10  # 10 分钟
+JWT_EXPIRE_MINUTES = 1  # 1 分钟（调试用）
 
 def create_access_token(data: dict) -> str:
     """生成 JWT access token"""
@@ -397,7 +397,7 @@ async def dashboard():
     from fastapi.responses import FileResponse
     import os
     dashboard_path = os.path.join(os.path.dirname(__file__), "..", "..", "dashboard.html")
-    return FileResponse(dashboard_path, media_type="text/html; charset=utf-8")
+    return FileResponse(dashboard_path, media_type="text/html; charset=utf-8", headers={"Cache-Control": "no-store"})
 
 # Dashboard 测试版
 @app.get("/dashboard_test", tags=["可视化"])
