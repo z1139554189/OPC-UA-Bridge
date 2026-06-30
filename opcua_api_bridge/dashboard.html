@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>OPC UA Dashboard (V1.4)</title>
+<title>YMT 数字化看板 (V1.4)</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.8/dist/chart.umd.min.js"></script>
 <style>
 :root { --bg: #0d1117; --card: #161b22; --border: #30363d; --text: #c9d1d9; --text2: #8b949e; --accent: #58a6ff; --green: #3fb950; --red: #f85149; --orange: #d29922; }
@@ -101,14 +101,14 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; b
 .login-box button:hover { background: #2ea043; }
 .login-box .err-msg { color: var(--red); font-size: 12px; margin-top: 12px; min-height: 18px; }
   </style>
-    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='4' fill='%232563eb'/><text x='16' y='23' text-anchor='middle' font-family='Arial,sans-serif' font-size='16' font-weight='bold' fill='white'>JQ</text></svg>" type="image/svg+xml">
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='4' fill='%232563eb'/><text x='16' y='23' text-anchor='middle' font-family='Arial,sans-serif' font-size='13' font-weight='bold' fill='white'>YMT</text></svg>" type="image/svg+xml">
 </head>
 <body>
 
 <!-- 登录遮罩 -->
 <div class="login-overlay" id="loginOverlay">
   <div class="login-box">
-    <h2>OPC UA Dashboard</h2>
+    <h2>YMT 数字化看板</h2>
     <div class="sub">V1.4 — 请输入授权账号登录</div>
     <label for="loginUser">账号</label>
     <input type="text" id="loginUser" placeholder="请输入账号" autocomplete="off" title="账号" aria-label="账号">
@@ -121,7 +121,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; b
 </div>
 
 <div class="header">
-  <h1>OPC UA Bridge Dashboard <span style="font-size:12px;color:var(--green);font-weight:normal;background:#1a2a1a;border-radius:4px;padding:2px 8px;margin-left:8px">V1.4</span><span style="font-size:11px;color:var(--text2);margin-left:8px;opacity:0.7">Powered by ZhangJiaqi</span></h1>
+  <h1>YMT 数字化看板 <span style="font-size:12px;color:var(--green);font-weight:normal;background:#1a2a1a;border-radius:4px;padding:2px 8px;margin-left:8px">V1.4</span><span style="font-size:11px;color:var(--text2);margin-left:8px;opacity:0.7">Powered by ZhangJiaqi</span></h1>
   <span class="status" id="connStatus">连接中...</span>
 </div>
 
