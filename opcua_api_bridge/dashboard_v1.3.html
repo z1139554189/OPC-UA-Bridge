@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>OPC UA Dashboard (V1.4)</title>
+<title>OPC UA Dashboard (V1.3)</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.8/dist/chart.umd.min.js"></script>
 <style>
 :root { --bg: #0d1117; --card: #161b22; --border: #30363d; --text: #c9d1d9; --text2: #8b949e; --accent: #58a6ff; --green: #3fb950; --red: #f85149; --orange: #d29922; }
@@ -109,7 +109,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; b
 <div class="login-overlay" id="loginOverlay">
   <div class="login-box">
     <h2>OPC UA Dashboard</h2>
-    <div class="sub">V1.4 — 请输入授权账号登录</div>
+    <div class="sub">V1.3 — 请输入授权账号登录</div>
     <label for="loginUser">账号</label>
     <input type="text" id="loginUser" placeholder="请输入账号" autocomplete="off" title="账号" aria-label="账号">
     <label for="loginPass">密码</label>
@@ -121,7 +121,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; b
 </div>
 
 <div class="header">
-  <h1>OPC UA Bridge Dashboard <span style="font-size:12px;color:var(--green);font-weight:normal;background:#1a2a1a;border-radius:4px;padding:2px 8px;margin-left:8px">V1.4</span><span style="font-size:11px;color:var(--text2);margin-left:8px;opacity:0.7">Powered by ZhangJiaqi</span></h1>
+  <h1>OPC UA Bridge Dashboard <span style="font-size:12px;color:var(--green);font-weight:normal;background:#1a2a1a;border-radius:4px;padding:2px 8px;margin-left:8px">V1.3</span><span style="font-size:11px;color:var(--text2);margin-left:8px;opacity:0.7">Powered by ZhangJiaqi</span></h1>
   <span class="status" id="connStatus">连接中...</span>
 </div>
 
@@ -279,7 +279,6 @@ async function authFetch(url, options = {}) {
   const resp = await fetch(url, { ...options, headers });
   if (resp.status === 401) {
     clearToken();
-    if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
     document.getElementById('loginOverlay').classList.remove('hidden');
     throw new Error('登录已过期，请重新登录');
   }
